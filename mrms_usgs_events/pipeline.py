@@ -24,7 +24,7 @@ log = get_logger("usgs_mrms_events.pipeline")
 
 def _run_site_wrapper(args):
     site_id, start_date, end_date, base_dir, overwrite, config = args
-    return run_site(
+    return download_single_site(
         site_id=site_id,
         start_date=start_date,
         end_date=end_date,
@@ -67,7 +67,7 @@ def _result_payload(
     }
 
 
-def run_site(
+def download_single_site(
     *,
     site_id: str | int,
     start_date: str = "2019-04-01",
@@ -280,7 +280,7 @@ def run_site(
     )
 
 
-def run_many(
+def download_many_sites(
     site_ids: list[str | int],
     *,
     start_date: str = "2019-04-01",
@@ -299,7 +299,7 @@ def run_many(
     skip = 0
     fail = 0
 
-    print(f"[run_many] sites={len(site_ids)} workers={worker_count}")
+    print(f"[download_many_sites] sites={len(site_ids)} workers={worker_count}")
 
     with Pool(worker_count) as pool:
         for result in pool.imap_unordered(_run_site_wrapper, tasks):

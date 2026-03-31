@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+
+[project]
+name = "mrms-usgs-events"
+version = "0.1.0"
+description = "Pipeline for downloading USGS site data, extracting events, and generating MRMS RadarOnly Zarr datasets."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+
+authors = [
+  { name = "Gonzalo Forero", email = "gonzaloforero57@gmail.com" },
+  { name = "Jacob Johnson", email = "jjohnson@aquaveo.com" }
+]
+
+keywords = [
+  "usgs",
+  "mrms",
+  "hydrology",
+  "geoscience",
+  "zarr",
+  "data-pipeline"
+]
+
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+]
+
+
+dependencies = [
+  "typer>=0.9",
+  "pandas",
+  "xarray",
+  "zarr",
+  "requests",
+]
+
+
+[project.urls]
+Repository = "https://github.com/GonzaloAlbertoForeroBuitrago/mrms_usgs_events"
+
+
+[project.scripts]
+mrms-usgs = "mrms_usgs_events.cli:app"
+
+
+[tool.setuptools.packages.find]
+where = ["."]
