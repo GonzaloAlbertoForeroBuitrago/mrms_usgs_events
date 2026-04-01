@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import os
 from pathlib import Path
 from typing import Optional
-
 
 
 class PipelineConfig:
@@ -22,8 +20,8 @@ class PipelineConfig:
 
     # Step tuning
     window_days: int = 365
-    stage_window_days: int = 365   # 
-    stage_ts_meta_limit: int = 100 # 
+    stage_window_days: int = 365
+    stage_ts_meta_limit: int = 100
     param_stage: str = "00065"
     top_n_events: int = 60
     event_filter_percentile: int = 50
@@ -33,7 +31,6 @@ class PipelineConfig:
     # HTTP
     http_timeout_usgs: int = 60
     http_timeout_mrms: int = 30
-
     http_headers_usgs: dict[str, str] = None  # type: ignore[assignment]
     http_headers_mrms: dict[str, str] = None  # type: ignore[assignment]
     usgs_api_key: Optional[str] = None
@@ -69,46 +66,46 @@ class PipelineConfig:
             if not hasattr(self, k):
                 raise ValueError(f"Unknown config key: {k}")
             setattr(self, k, v)
+        self._resolve()
 
-    def __post_init__(self) -> None:  # dataclass hook (even frozen)
-        object.__setattr__(self, "base_dir", Path(self.base_dir).expanduser().resolve())
+    def _resolve(self) -> None:
+        """Resolve and fill in all derived/default values."""
+        # base_dir
+        self.base_dir = Path(self.base_dir).expanduser().resolve()
 
-        # Default log_dir is <base_dir>/logs if not set
-        resolved_log_dir = Path(self.log_dir).expanduser().resolve() if self.log_dir else (self.base_dir / "logs")
-        object.__setattr__(self, "log_dir", resolved_log_dir)
+        # log_dir defaults to <base_dir>/logs
+        self.log_dir = (
+            Path(self.log_dir).expanduser().resolve()
+            if self.log_dir
+            else self.base_dir / "logs"
+        )
 
-        # Default shared MRMS cache outside per-station folders
-        resolved_cache_dir = (
+        # mrms_cache_dir defaults to <base_dir>/_mrms_cache
+        self.mrms_cache_dir = (
             Path(self.mrms_cache_dir).expanduser().resolve()
             if self.mrms_cache_dir
-            else (self.base_dir / "_mrms_cache")
+            else self.base_dir / "_mrms_cache"
         )
-        object.__setattr__(self, "mrms_cache_dir", resolved_cache_dir)
 
-        resolved_usgs_api_key = self.usgs_api_key or os.getenv("USGS_API_KEY")
-        object.__setattr__(self, "usgs_api_key", resolved_usgs_api_key)
+        # USGS API key (kwarg or env var)
+        self.usgs_api_key = self.usgs_api_key or os.getenv("USGS_API_KEY")
 
-        resolved_http_headers_usgs = self.http_headers_usgs or {
-            "User-Agent": "usgs-mrms-events/0.1",
-            "Accept": "application/geo+json, application/json;q=0.9, */*;q=0.1",
-            "Accept-Encoding": "gzip",
-        }
-        resolved_http_headers_usgs = dict(resolved_http_headers_usgs)
-
-        if resolved_usgs_api_key:
-            resolved_http_headers_usgs["X-Api-Key"] = resolved_usgs_api_key
-
-        object.__setattr__(self, "http_headers_usgs", resolved_http_headers_usgs)
-
-       
-
-        object.__setattr__(
-            self,
-            "http_headers_mrms",
-            self.http_headers_mrms
+        # USGS HTTP headers
+        headers_usgs = dict(
+            self.http_headers_usgs
             or {
                 "User-Agent": "usgs-mrms-events/0.1",
-                "Accept": "*/*",
+                "Accept": "application/geo+json, application/json;q=0.9, */*;q=0.1",
                 "Accept-Encoding": "gzip",
-            },
+            }
         )
+        if self.usgs_api_key:
+            headers_usgs["X-Api-Key"] = self.usgs_api_key
+        self.http_headers_usgs = headers_usgs
+
+        # MRMS HTTP headers
+        self.http_headers_mrms = self.http_headers_mrms or {
+            "User-Agent": "usgs-mrms-events/0.1",
+            "Accept": "*/*",
+            "Accept-Encoding": "gzip",
+        }
