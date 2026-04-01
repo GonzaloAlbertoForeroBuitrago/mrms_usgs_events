@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Optional
 
 
-@dataclass(frozen=True)
+
 class PipelineConfig:
     """Central configuration for the USGS→events→MRMS pipeline.
 
@@ -63,6 +63,12 @@ class PipelineConfig:
     ogc_ts_meta: str = "https://api.waterdata.usgs.gov/ogcapi/v0/collections/time-series-metadata/items"
     ogc_continuous: str = "https://api.waterdata.usgs.gov/ogcapi/v0/collections/continuous/items"
     basin_gages_endpoint: str = "https://api.water.usgs.gov/fabric/pygeoapi/collections/gagesii-basins/items"
+
+    def __init__(self, **kwargs):
+        for k, v in kwargs.items():
+            if not hasattr(self, k):
+                raise ValueError(f"Unknown config key: {k}")
+            setattr(self, k, v)
 
     def __post_init__(self) -> None:  # dataclass hook (even frozen)
         object.__setattr__(self, "base_dir", Path(self.base_dir).expanduser().resolve())
