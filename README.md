@@ -1,3 +1,5 @@
+## Citation
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.19378062.svg)](https://doi.org/10.5281/zenodo.19378062)
 ## For windows in a  WSL terminal. Environment creation and package Installation
 conda create -n mrms_usgs_events -c conda-forge python=3.11 gdal geopandas libgdal-grib -y
 
