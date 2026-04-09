@@ -8,6 +8,7 @@ from typing import Any, Iterable, Optional
 
 import pandas as pd
 import requests
+from shapely.geometry import MultiPolygon, mapping, shape
 
 from .config import PipelineConfig
 from .io import date_windows, now_utc_iso
@@ -45,6 +46,106 @@ def get_json(
 
     raise RuntimeError(f"USGS request failed after {max_retries} retries: {url}")
 
+
+def get_site_metadata(site_id: str) -> tuple[float, float, str]:
+    meta_url = (
+        f"https://api.waterdata.usgs.gov/ogcapi/v0/collections/"
+        f"monitoring-locations/items/USGS-{site_id}?f=json"
+    )
+
+    meta = get_json(meta_url)
+    geometry = meta.get("geometry")
+    if not geometry or "coordinates" not in geometry:
+        raise ValueError("Metadata is missing geometry.coordinates")
+    
+    coords = geometry["coordinates"]
+    if not isinstance(coords, (list, tuple)) or len(coords) < 2:
+        raise ValueError("Invalid coordinates in metadata")
+    
+    lon = float(coords[0])
+    lat = float(coords[1])
+
+    return lon, lat
+
+def get_hydrolocation_feature_id(lon: float, lat: float) -> str:
+    lon_s = f"{lon:.6f}"
+    lat_s = f"{lat:.6f}"
+
+    hydro_url = (
+        "https://api.water.usgs.gov/nldi/linked-data/"
+        f"hydrolocation?coords=POINT({lon_s} {lat_s})"
+    )
+
+    hydro = get_json(hydro_url)
+    features = hydro.get("features", [])
+
+    if not features:
+        raise ValueError("hydrolocation no devolvió resultados")
+
+    props = features[0].get("properties", {})
+    feature_id = (
+        props.get("comid")
+        or props.get("nhdplus_comid")
+        or props.get("identifier")
+        or props.get("id")
+    )
+
+    if feature_id is None:
+        raise ValueError("No encontré un feature_id utilizable en hydrolocation")
+
+    return str(feature_id)
+
+def get_basin_geometry(feature_id: str) -> MultiPolygon:
+    basin_url = f"https://api.water.usgs.gov/nldi/linked-data/comid/{feature_id}/basin"
+    basin = get_json(basin_url)
+
+    features = basin.get("features", [])
+    if not features:
+        raise ValueError("El endpoint basin no devolvió geometría")
+
+    geometry = features[0].get("geometry")
+    if not geometry:
+        raise ValueError("Feature basin sin geometry")
+
+    geom = shape(geometry)
+
+    if geom.is_empty:
+        raise ValueError("Geometría vacía")
+
+    if geom.geom_type == "Polygon":
+        geom = MultiPolygon([geom])
+    elif geom.geom_type != "MultiPolygon":
+        raise ValueError(f"Geometría no soportada: {geom.geom_type}")
+
+    if not geom.is_valid:
+        geom = geom.buffer(0)
+
+    if geom.is_empty:
+        raise ValueError("Geometría inválida quedó vacía después de buffer(0)")
+
+    return geom
+
+def build_feature(site_id: str, geom: MultiPolygon) -> dict[str, Any]:
+    return {
+        "type": "Feature",
+        "properties": {
+            "ogc_fid": 1,
+            "area": float(geom.area),
+            "perimeter": float(geom.length),
+            "gage_id": site_id,
+        },
+        "id": 1,
+        "geometry": mapping(geom),
+        "prev": None,
+        "next": None,
+        "links": [],
+    }
+
+def atomic_write_json(path: Path, data: dict[str, Any]) -> None:
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with tmp.open("w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False)
+    tmp.replace(path)
 
 def fetch_monitoring_location(cfg: PipelineConfig, site_id: str) -> dict:
     sid = normalize_site_id(site_id)
@@ -100,6 +201,29 @@ def download_basin_json(cfg: PipelineConfig, site_id: str, out_json: Path, done_
 
     out_json.write_text(json.dumps(data, indent=2), encoding="utf-8")
     done_marker.write_text(now_utc_iso(), encoding="utf-8")
+
+def build_basin_json(cfg: PipelineConfig, site_id: str, out_json: Path, done_marker: Path, *, overwrite:bool) -> None:
+    if done_marker.exists() and out_json.exists() and not overwrite:
+        return
+    if out_json.exists() and not overwrite and not done_marker.exists():
+        done_marker.write_text(now_utc_iso(), encoding="utf-8")
+        return
+    try: 
+        site_id = normalize_site_id(site_id)
+        lon, lat = get_site_metadata(site_id)
+
+        feature_id = get_hydrolocation_feature_id(lon, lat)
+        geom = get_basin_geometry(feature_id)
+        feature = build_feature(site_id, geom)
+
+        atomic_write_json(out_json, feature)
+
+        done_marker.write_text(now_utc_iso(), encoding="utf-8")
+
+    except Exception as e:
+        raise RuntimeError(f"Failed to build basin JSON for site_id={site_id}: {type(e).__name__}: {e}") from e
+
+
 
 
 def discover_time_series_id(cfg: PipelineConfig, site_id: str) -> Optional[str]:

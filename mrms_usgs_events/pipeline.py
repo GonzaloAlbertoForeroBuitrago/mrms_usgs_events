@@ -14,6 +14,7 @@ from .mrms import build_zarr_radaronly_from_windows
 from .paths import build_station_paths, ensure_path_parent, normalize_site_id
 from .usgs_api import (
     download_basin_json,
+    build_basin_json,
     download_stage_parquet,
     extract_inventory_row,
     fetch_monitoring_location,
@@ -121,6 +122,13 @@ def download_single_site(
             slog.warning(f"[{sid}] basin_json missing after download attempt: {paths['basin_json']}")
     except Exception as e:
         slog.exception(f"[{sid}] basin download failed: {e}")
+
+    if not basin_ok:
+        slog.log(msg=f"[{sid}] basin_json missing; attempting to build from hydrolocation...", level=slog.level)
+        try:
+            build_basin_json(cfg, sid, paths["basin_json"], paths["done_basin"], overwrite=overwrite)
+        except Exception as e:
+            slog.exception(f"[{sid}] basin build failed: {e}")
 
     # Step C: stage parquet
     stage_rows = 0
