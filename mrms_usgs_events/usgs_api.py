@@ -14,6 +14,26 @@ from .config import PipelineConfig
 from .io import date_windows, now_utc_iso
 from .paths import normalize_site_id
 
+STATIONS_INVENTORY_PATH = "./data/stations_inventory.csv"
+TIMEOUT = 60
+MAX_RETRIES = 6
+BACKOFF_SECONDS = 3
+OGC_MONITORING_URL = "https://api.waterdata.usgs.gov/ogcapi/v0/collections/monitoring-locations/items"
+IV_URL = "https://waterservices.usgs.gov/nwis/iv/"
+HEADERS_OGC = {
+    "User-Agent": "mrms-usgs-stage-backfill/1.0",
+    "Accept": "application/geo+json, application/json;q=0.9, */*;q=0.1",
+    "Accept-Encoding": "gzip",
+}
+HEADERS_IV = {
+    "User-Agent": "mrms-usgs-stage-backfill/1.0",
+    "Accept": "application/json",
+    "Accept-Encoding": "gzip",
+}
+START_DATE = "2019-04-01"
+END_DATE = "2026-01-30"
+PARAM_CODE = "00065"
+
 
 def get_json(
     url: str,
@@ -222,10 +242,7 @@ def build_basin_json(cfg: PipelineConfig, site_id: str, out_json: Path, done_mar
 
     except Exception as e:
         raise RuntimeError(f"Failed to build basin JSON for site_id={site_id}: {type(e).__name__}: {e}") from e
-
-
-
-
+    
 def discover_time_series_id(cfg: PipelineConfig, site_id: str) -> Optional[str]:
     sid = normalize_site_id(site_id)
 
@@ -375,12 +392,90 @@ def download_stage_parquet(
         if dfw is not None and not dfw.empty:
             parts.append(dfw)
         time.sleep(0.35 + random.uniform(0.0, 0.2))
+    if parts:
+        print("Stage window data successfully retrieved")
 
-    if not parts:
-        return 0
+    else:
+        print("No stage window data found, falling back to IV data")
+        df_all = fetch_iv(site_id)
+        if df_all is None or df_all.empty:
+            print("No IV data found either, returning 0")
+            return 0
+        print("IV data successfully retrieved")
+        parts.append(df_all)
 
     df_all = pd.concat(parts, ignore_index=True).sort_values("datetime").drop_duplicates("datetime")
     out_parquet.parent.mkdir(parents=True, exist_ok=True)
     df_all.to_parquet(out_parquet, index=False, engine="pyarrow")
     done_marker.write_text(now_utc_iso(), encoding="utf-8")
     return int(len(df_all))
+
+def retry_get(
+    url: str,
+    *,
+    params: Optional[dict] = None,
+    headers: Optional[dict] = None,
+    timeout: int = TIMEOUT,
+) -> requests.Response:
+    last_err = None
+
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            r = requests.get(url, params=params, headers=headers, timeout=timeout)
+            if r.status_code in (429, 500, 502, 503, 504):
+                raise requests.HTTPError(f"{r.status_code} transient", response=r)
+            r.raise_for_status()
+            return r
+        except Exception as e:
+            last_err = e
+            if attempt == MAX_RETRIES:
+                raise
+            time.sleep(BACKOFF_SECONDS * attempt)
+
+    raise last_err
+
+def finalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+
+    df = df.copy()
+    df["datetime"] = pd.to_datetime(df["datetime"], utc=True, errors="coerce")
+    df["Stage_ft"] = pd.to_numeric(df["Stage_ft"], errors="coerce")
+
+    df = df.dropna(subset=["datetime", "Stage_ft"])
+    if df.empty:
+        return df
+
+    df = df.sort_values("datetime").drop_duplicates(subset=["datetime"], keep="last")
+    return df.reset_index(drop=True)
+
+def normalize_iv_timeseries(timeseries_list: Iterable[dict]) -> pd.DataFrame:
+    rows = []
+    for ts in timeseries_list:
+        for block in ts.get("values", []) or []:
+            for item in block.get("value", []) or []:
+                qualifiers = item.get("qualifiers")
+                if isinstance(qualifiers, list):
+                    qualifiers = ",".join(qualifiers)
+
+                rows.append(
+                    {
+                        "datetime": item.get("dateTime"),
+                        "Stage_ft": item.get("value"),
+                    }
+                )
+
+    return pd.DataFrame(rows)
+
+def fetch_iv(site_id: str) -> pd.DataFrame:
+    params = {
+        "format": "json",
+        "sites": site_id,
+        "parameterCd": PARAM_CODE,
+        "startDT": START_DATE,
+        "endDT": END_DATE,
+    }
+    r = retry_get(IV_URL, params=params, headers=HEADERS_IV)
+    data = r.json()
+    timeseries_list = data.get("value", {}).get("timeSeries", []) or []
+    return finalize_dataframe(normalize_iv_timeseries(timeseries_list))

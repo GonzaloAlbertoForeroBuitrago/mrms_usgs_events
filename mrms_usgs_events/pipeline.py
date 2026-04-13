@@ -127,6 +127,10 @@ def download_single_site(
         slog.log(msg=f"[{sid}] basin_json missing; attempting to build from hydrolocation...", level=slog.level)
         try:
             build_basin_json(cfg, sid, paths["basin_json"], paths["done_basin"], overwrite=overwrite)
+            basin_ok = paths["basin_json"].exists()
+            if not basin_ok:
+                slog.warning(f"[{sid}] basin_json missing after build attempt: {paths['basin_json']}")
+
         except Exception as e:
             slog.exception(f"[{sid}] basin build failed: {e}")
 
@@ -147,11 +151,12 @@ def download_single_site(
         )
         stage_ok = paths["stage_parquet"].exists() and stage_rows > 0
         if not stage_ok:
+            
             if paths["stage_parquet"].exists() and stage_rows <= 0:
                 try:
                     paths["stage_parquet"].unlink(missing_ok=True)
                 except Exception:
-                    pass
+                    slog.warning(f"[{sid}] stage_parquet exists but empty; deleted {paths['stage_parquet']}")
             slog.warning(
                 f"[{sid}] stage_parquet missing or empty after download attempt: "
                 f"{paths['stage_parquet']} | rows={stage_rows}"
