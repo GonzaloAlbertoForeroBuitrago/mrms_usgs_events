@@ -420,3 +420,24 @@ def build_zarr_radaronly_from_windows(
     init_zarr(times, out_zarr)
     aws_ok, mt_ok, cache_hits = resume_fill_rain(cfg, out_zarr, mask, missing_csv)
     return int(len(times)), int(mask["rows"].size), int(aws_ok + mt_ok + cache_hits)
+
+def build_zarr_radaronly_from_timerange(
+    cfg: PipelineConfig,
+    start,
+    end,
+    basin_json: Path,
+    out_zarr: Path,
+    missing_csv: Path,
+) -> Tuple[int, int, int]:
+    times = hours_from_windows(
+        pd.DataFrame({"start_rain": [start], "end_rain": [end]}),
+        "start_rain",
+        "end_rain",
+    )
+
+    _, gz_bytes = first_available_radaronly(cfg, times, max_checks=80, widen=48)
+    mask = build_mask_and_lonlat_from_basin(basin_json, gz_bytes, dtype=cfg.dtype)
+
+    init_zarr(times, out_zarr)
+    aws_ok, mt_ok, cache_hits = resume_fill_rain(cfg, out_zarr, mask, missing_csv)
+    return int(len(times)), int(mask["rows"].size), int(aws_ok + mt_ok + cache_hits)
