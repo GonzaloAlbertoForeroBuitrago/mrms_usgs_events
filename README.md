@@ -28,11 +28,11 @@ micromamba activate mrms_usgs_events
 
 python -m pip install --upgrade pip               # Upgrade pip
 
-# Development mode (code modifications)
+### Development mode (code modifications)
 
 pip install -e .
 
-# User mode (No code modifications)
+### User mode (No code modifications)
 python -m pip install mrms-usgs-events            # Install the package (Do NOT run if using development mode (-e))
 
 4. Verify installation
