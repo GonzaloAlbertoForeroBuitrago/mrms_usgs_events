@@ -1,6 +1,15 @@
 ## Citation
+
+If you use this package in your research, please cite:
+
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.19378061.svg)](https://doi.org/10.5281/zenodo.19378061)
-## For windows in a  WSL terminal. Environment creation and package Installation
+
+## Environment Setup & package Installation 
+
+(WSL required for Windows users due to GDAL/GRIB dependencies) 
+
+1. Install Micromamba
+
 curl -Ls https://micro.mamba.pm/install.sh | bash
 
 source ~/.bashrc
@@ -9,15 +18,24 @@ micromamba --version
 
 micromamba info
 
+2. Create and activate environment
+
 micromamba create -n mrms_usgs_events -c conda-forge python=3.11 gdal geopandas libgdal-grib -y
 
 micromamba activate mrms_usgs_events
 
+3. Install the package
+
 python -m pip install --upgrade pip               # Upgrade pip
 
-pip install -e .                                  # Development mode (contributors), run in the package folder.
+# Development mode (code modifications)
 
+pip install -e .
+
+# User mode (No code modifications)
 python -m pip install mrms-usgs-events            # Install the package (Do NOT run if using development mode (-e))
+
+4. Verify installation
 
 gdalinfo --formats | grep -i grib                 # Verify gdal grib
 
