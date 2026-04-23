@@ -17,7 +17,7 @@ python -m pip install --upgrade pip               # Upgrade pip
 
 pip install -e .                                  # Development mode (contributors)
 
-python -m pip install mrms-usgs-events            # Install the package (Do NOT run if using developmento mode (-e))
+python -m pip install mrms-usgs-events            # Install the package (Do NOT run if using development mode (-e))
 
 gdalinfo --formats | grep -i grib                 # Verify gdal grib
 
