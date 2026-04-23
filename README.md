@@ -1,9 +1,11 @@
 ## Citation
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.19378061.svg)](https://doi.org/10.5281/zenodo.19378061)
 ## For windows in a  WSL terminal. Environment creation and package Installation
-conda create -n mrms_usgs_events -c conda-forge python=3.11 gdal geopandas libgdal-grib -y
+Install micromamba
 
-conda activate mrms_usgs_events
+micromamba create -n mrms_usgs_events -c conda-forge python=3.11 gdal geopandas libgdal-grib -y
+
+micromamba activate mrms_usgs_events
 
 python -m pip install --upgrade pip               # Upgrade pip
 
