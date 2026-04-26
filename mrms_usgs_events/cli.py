@@ -3,13 +3,15 @@ from __future__ import annotations
 from pathlib import Path
 import json
 import typer
-
+import pandas as pd
 from .config import PipelineConfig
 from .logger import setup_logging, get_logger
 from .pipeline import download_single_site
 from .mrms import build_zarr_radaronly_from_timerange
-from .usgs_api import fetch_monitoring_location, download_basin_json, download_stage_parquet
+from .mrms_parallel import (build_zarr_radaronly_from_timerange_parallel, write_current_manifest)
+from .usgs_api import fetch_monitoring_location, download_basin_json, download_stage_parquet, build_basin_json
 from .io import load_stage_with_utc_local, now_utc_iso, resolve_iana_timezone
+from multiprocessing import get_context
 
 app = typer.Typer(add_completion=False, help="USGS → events → MRMS RadarOnly Zarr pipeline (resume-safe).")
 log = get_logger("usgs_mrms_events.cli")
@@ -165,5 +167,312 @@ def rain_manual_cmd(
         f"Files OK: {files_ok}"
     )
 
-if __name__ == "__main__":
-    app()
+@app.command("rain-manual-parallel")
+def rain_manual_parallel_cmd(
+    site_id: str = typer.Option(..., "--site-id"),
+    state: str = typer.Option(..., "--state"),
+    start: str = typer.Option(..., "--start"),
+    end: str = typer.Option(..., "--end"),
+    base_dir: Path = typer.Option(Path("usgs_mrms_events_data"), "--base-dir"),
+    workers: int = typer.Option(4, "--workers", help="Parallel hourly workers."),
+) -> None:
+    """
+    Download MRMS RadarOnly rainfall for a manual/current time window using
+    parallel hourly workers.
+
+    This command does not modify run-site, run-many, or rain-manual.
+    Outputs are stored under current_runs/ to keep operational/current data
+    separate from historical event products.
+    """
+    cfg = PipelineConfig(base_dir=base_dir.resolve())
+
+    state = state.upper()
+    workers = max(1, min(int(workers), int(cfg.max_workers_cap)))
+
+    p2 = site_id[:2]
+    p4 = site_id[:4]
+
+    run_id = (
+        f"{pd.Timestamp(start).strftime('%Y%m%dT%H%M%S')}_"
+        f"{pd.Timestamp(end).strftime('%Y%m%dT%H%M%S')}"
+    )
+
+    shared_dir = cfg.base_dir
+    current_dir = cfg.base_dir / "current_runs" / state / p2 / p4 / site_id / run_id
+
+    basin_json = shared_dir / "basins_json" / state / p2 / p4 / f"{site_id}.json"
+    site_meta_json = shared_dir / "site_meta" / state / p2 / p4 / f"{site_id}_monitoring_location.json"
+
+    stage_parquet = current_dir / "stage" / f"{site_id}_current.parquet"
+    stage_local_parquet = current_dir / "stage" / f"{site_id}_current_local.parquet"
+
+    out_zarr = current_dir / "rain_zarr" / f"{site_id}_current.zarr"
+    missing_csv = current_dir / "missing" / f"{site_id}_current_missing_radaronly_hours.csv"
+    manifest_json = current_dir / "manifest.json"
+
+    out_zarr.parent.mkdir(parents=True, exist_ok=True)
+
+    ensure_manual_inputs(
+        cfg=cfg,
+        site_id=site_id,
+        start=start,
+        end=end,
+        basin_json=basin_json,
+        stage_parquet=stage_parquet,
+        stage_local_parquet=stage_local_parquet,
+        site_meta_json=site_meta_json,
+    )
+
+    hours_n, pixels_n, files_ok = build_zarr_radaronly_from_timerange_parallel(
+        cfg=cfg,
+        start=start,
+        end=end,
+        basin_json=basin_json,
+        out_zarr=out_zarr,
+        missing_csv=missing_csv,
+        workers=workers,
+    )
+
+    write_current_manifest(
+        site_id=site_id,
+        state=state,
+        start=start,
+        end=end,
+        workers=workers,
+        basin_json=basin_json,
+        site_meta_json=site_meta_json,
+        stage_parquet=stage_parquet,
+        stage_local_parquet=stage_local_parquet,
+        out_zarr=out_zarr,
+        missing_csv=missing_csv,
+        manifest_json=manifest_json,
+    )
+
+    typer.echo(
+        f"[{site_id}] rain-manual-parallel completed.\n"
+        f"Mode: current/manual parallel\n"
+        f"Workers: {workers}\n"
+        f"Meta: {site_meta_json}\n"
+        f"Stage UTC: {stage_parquet}\n"
+        f"Stage local: {stage_local_parquet}\n"
+        f"Basin: {basin_json}\n"
+        f"Rain Zarr: {out_zarr}\n"
+        f"Missing CSV: {missing_csv}\n"
+        f"Manifest: {manifest_json}\n"
+        f"Hours: {hours_n}\n"
+        f"Pixels: {pixels_n}\n"
+        f"Files OK: {files_ok}"
+    )
+
+def _run_one_site(args):
+    site_id, state, start, end, cfg, hour_workers = args
+
+    try:
+        p2 = site_id[:2]
+        p4 = site_id[:4]
+
+        run_id = (
+            f"{pd.Timestamp(start).strftime('%Y%m%dT%H%M%S')}_"
+            f"{pd.Timestamp(end).strftime('%Y%m%dT%H%M%S')}"
+        )
+
+        current_dir = (
+            cfg.base_dir
+            / "current_runs"
+            / state
+            / p2
+            / p4
+            / site_id
+            / run_id
+        )
+
+        basin_json = cfg.base_dir / "basins_json" / state / p2 / p4 / f"{site_id}.json"
+        basin_done = cfg.base_dir / "basins_json" / state / p2 / p4 / f"{site_id}.basin.done"
+
+        site_meta_json = cfg.base_dir / "site_meta" / state / p2 / p4 / f"{site_id}_monitoring_location.json"
+
+        stage_parquet = current_dir / "stage" / f"{site_id}_current.parquet"
+        stage_local_parquet = current_dir / "stage" / f"{site_id}_current_local.parquet"
+
+        out_zarr = current_dir / "rain_zarr" / f"{site_id}_current.zarr"
+        missing_csv = current_dir / "missing" / f"{site_id}_current_missing_radaronly_hours.csv"
+        manifest_json = current_dir / "manifest.json"
+
+        out_zarr.parent.mkdir(parents=True, exist_ok=True)
+
+        # ============================================================
+        # BASIN JSON: same robust logic as run-site/run-many
+        # 1) direct download
+        # 2) fallback build from hydrolocation
+        # ============================================================
+        basin_json.parent.mkdir(parents=True, exist_ok=True)
+        basin_done.parent.mkdir(parents=True, exist_ok=True)
+
+        basin_ok = basin_json.exists()
+
+        if not basin_ok:
+            try:
+                download_basin_json(
+                    cfg,
+                    site_id,
+                    basin_json,
+                    basin_done,
+                    overwrite=False,
+                )
+                basin_ok = basin_json.exists()
+            except Exception:
+                basin_ok = False
+
+        if not basin_ok:
+            try:
+                build_basin_json(
+                    cfg,
+                    site_id,
+                    basin_json,
+                    basin_done,
+                    overwrite=False,
+                )
+                basin_ok = basin_json.exists()
+            except Exception as e:
+                return f"[ERROR] {site_id}: basin build failed: {type(e).__name__}: {e}"
+
+        if not basin_ok:
+            return f"[ERROR] {site_id}: basin_json missing after download/build"
+
+        # ============================================================
+        # METADATA + STAGE
+        # ============================================================
+        ensure_manual_inputs(
+            cfg=cfg,
+            site_id=site_id,
+            start=start,
+            end=end,
+            basin_json=basin_json,
+            stage_parquet=stage_parquet,
+            stage_local_parquet=stage_local_parquet,
+            site_meta_json=site_meta_json,
+        )
+
+        # ============================================================
+        # RAINFALL ZARR
+        # For many sites, hours are processed serially per site.
+        # Parallelism is already happening by site.
+        # ============================================================
+        build_zarr_radaronly_from_timerange(
+            cfg=cfg,
+            start=start,
+            end=end,
+            basin_json=basin_json,
+            out_zarr=out_zarr,
+            missing_csv=missing_csv,
+        )
+
+        # ============================================================
+        # MANIFEST
+        # ============================================================
+        write_current_manifest(
+            site_id=site_id,
+            state=state,
+            start=start,
+            end=end,
+            workers=hour_workers,
+            basin_json=basin_json,
+            site_meta_json=site_meta_json,
+            stage_parquet=stage_parquet,
+            stage_local_parquet=stage_local_parquet,
+            out_zarr=out_zarr,
+            missing_csv=missing_csv,
+            manifest_json=manifest_json,
+        )
+
+        return f"[OK] {site_id}"
+
+    except Exception as e:
+        return f"[ERROR] {site_id}: {type(e).__name__}: {e}"
+
+
+@app.command("rain-current-many")
+def rain_current_many_cmd(
+    sites_file: Path = typer.Option(..., "--sites-file"),
+    state: str = typer.Option(..., "--state"),
+    hours_back: int = typer.Option(12, "--hours-back"),
+    base_dir: Path = typer.Option(Path("usgs_mrms_events_data"), "--base-dir"),
+    site_workers: int = typer.Option(4, "--site-workers"),
+    hour_workers: int = typer.Option(1, "--hour-workers"),
+) -> None:
+    """
+    Run current rainfall extraction for MANY sites using last N hours.
+
+    Parallelism is by SITE.
+    For many sites and short windows, each site processes hours serially.
+    """
+
+    cfg = PipelineConfig(base_dir=base_dir.resolve())
+    state = state.upper()
+
+    end_ts = pd.Timestamp.utcnow().floor("h")
+    start_ts = end_ts - pd.Timedelta(hours=hours_back)
+
+    start = start_ts.strftime("%Y-%m-%d %H:%M:%S")
+    end = end_ts.strftime("%Y-%m-%d %H:%M:%S")
+
+    print("=" * 80)
+    print("RAIN CURRENT MANY")
+    print("=" * 80)
+    print(f"State: {state}")
+    print(f"Sites file: {sites_file}")
+    print(f"Start: {start}")
+    print(f"End: {end}")
+    print(f"Site workers: {site_workers}")
+    print(f"Hour workers per site: {hour_workers}")
+    print("=" * 80)
+
+    df_sites = pd.read_csv(
+        sites_file,
+        sep=r"\s+",
+        dtype={"site_id": str, "state": str},
+    )
+
+    df_sites["state"] = df_sites["state"].str.upper()
+
+    site_ids = (
+        df_sites.loc[df_sites["state"] == state, "site_id"]
+        .dropna()
+        .astype(str)
+        .str.zfill(8)
+        .drop_duplicates()
+        .tolist()
+    )
+
+    if not site_ids:
+        raise typer.BadParameter(
+            f"No sites found for state={state} in {sites_file}"
+        )
+
+    site_workers = max(1, min(int(site_workers), len(site_ids)))
+
+    print(f"Total sites for {state}: {len(site_ids)}")
+    print(f"Starting parallel execution with {site_workers} workers...\n")
+
+    tasks = [(sid, state, start, end, cfg, int(hour_workers)) for sid in site_ids]
+
+    ctx = get_context("fork")
+
+    ok = 0
+    error = 0
+
+    with ctx.Pool(processes=site_workers) as pool:
+        for msg in pool.imap_unordered(_run_one_site, tasks):
+            print(msg, flush=True)
+            if str(msg).startswith("[OK]"):
+                ok += 1
+            else:
+                error += 1
+
+    print("\nDONE.")
+    print(f"OK: {ok}")
+    print(f"ERROR: {error}")
+
+
+from .ews.cli_commands import ews_app
+app.add_typer(ews_app, name="ews")
