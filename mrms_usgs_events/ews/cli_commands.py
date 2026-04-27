@@ -7,7 +7,7 @@ import typer
 from .historical_summary import build_many_historical_summaries, build_site_historical_summary
 from .predictors import fit_basin_predictors
 from .realtime_engine import run_state_alert_engine
-
+from .state_rain import build_current_state_rain_npz
 
 ews_app = typer.Typer(help="Operational Early Warning System tools.")
 
@@ -50,7 +50,37 @@ def ews_run_state_cmd(
     state_basin_index: Path = typer.Option(..., "--state-basin-index"),
     predictor_dir: Path = typer.Option(..., "--predictor-dir"),
     out_dir: Path = typer.Option(..., "--out-dir"),
+    historical_summary_dir: Path | None = typer.Option(None, "--historical-summary-dir"),
 ):
-    paths = run_state_alert_engine(state=state, recent_rain_npz=recent_rain_npz, state_basin_index=state_basin_index, predictor_dir=predictor_dir, out_dir=out_dir)
+    paths = run_state_alert_engine(
+        state=state,
+        recent_rain_npz=recent_rain_npz,
+        state_basin_index=state_basin_index,
+        predictor_dir=predictor_dir,
+        out_dir=out_dir,
+        historical_summary_dir=historical_summary_dir,
+    )
     for name, fp in paths.items():
         typer.echo(f"{name}: {fp}")
+@ews_app.command("state-rain-current")
+def ews_state_rain_current_cmd(
+    state: str = typer.Option(..., "--state"),
+    state_mask: Path = typer.Option(..., "--state-mask"),
+    out_npz: Path = typer.Option(..., "--out-npz"),
+    base_dir: Path = typer.Option(Path("usgs_mrms_events_data"), "--base-dir"),
+    hours_back: int = typer.Option(12, "--hours-back"),
+    workers: int = typer.Option(4, "--workers"),
+    start: str | None = typer.Option(None, "--start"),
+    end: str | None = typer.Option(None, "--end"),
+):
+    out = build_current_state_rain_npz(
+        state=state,
+        state_mask_fp=state_mask,
+        out_npz=out_npz,
+        base_dir=base_dir,
+        hours_back=hours_back,
+        workers=workers,
+        start=start,
+        end=end,
+    )
+    typer.echo(f"Saved: {out}")
