@@ -41,25 +41,32 @@ gdalinfo --formats | grep -i grib                 # Verify gdal grib
 
 mrms-usgs --help                                  # Verify installation
 
-## Example use for the Texas July 4 2025 event at the Mystic Camp. (Use at least 1 year between start and end) 
-#Use event downloader
+###Example use for the Texas July 4 2025 event at the Mystic Camp. (Use at least 1 year between start and end) 
+
 mrms-usgs run-site 08165500 \
   --start 2023-07-01 \
   --end 2025-07-10 \
   --base-dir data \
   --overwrite
-# Create input tsv
+### Create input tsv
 mrms-usgs masks build-input \
   --basins-dir "$BASE_DIR/basins_json" \
   --out "$MASK_INPUT" \
   --overwrite
-# mrms-usgs masks build-state-masks \
+### mrms-usgs masks build-state-masks \
 mrms-usgs masks build-state-masks \
   --sample-grib-gz "$SAMPLE_GRIB" \
   --mask-input "$MASK_INPUT" \
   --out-dir "$STATE_MASK_DIR" \
   --overwrite
-# 
+### Create state basin index
+mrms-usgs masks build-state-basin-index \
+  --sample-grib-gz "$SAMPLE_GRIB" \
+  --mask-input "$MASK_INPUT" \
+  --state-mask-dir "$STATE_MASK_DIR" \
+  --out-dir "$STATE_INDEX_DIR" \
+  --overwrite
+
 ## Data directory with subfolders created following this structure
 data/
 
