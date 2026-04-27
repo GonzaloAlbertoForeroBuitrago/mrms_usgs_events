@@ -66,6 +66,12 @@ mrms-usgs masks build-state-basin-index \
   --state-mask-dir "$STATE_MASK_DIR" \
   --out-dir "$STATE_INDEX_DIR" \
   --overwrite
+### Extract event information (Run using tmux)
+mrms-usgs ews build-history-many \
+  --mask-input "$MASK_INPUT" \
+  --base-dir "$BASE_DIR" \
+  --out-dir "$EWS_HISTORY_DIR" \
+  --overwrite
 
 ## Data directory with subfolders created following this structure
 data/
