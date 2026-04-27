@@ -14,6 +14,8 @@ from .io import load_stage_with_utc_local, now_utc_iso, resolve_iana_timezone
 from multiprocessing import get_context
 
 app = typer.Typer(add_completion=False, help="USGS → events → MRMS RadarOnly Zarr pipeline (resume-safe).")
+masks_app = typer.Typer(help="Build MRMS spatial masks and basin indexes.")
+app.add_typer(masks_app, name="masks")
 log = get_logger("usgs_mrms_events.cli")
 
 @app.command("run-site")
@@ -473,6 +475,101 @@ def rain_current_many_cmd(
     print(f"OK: {ok}")
     print(f"ERROR: {error}")
 
+@masks_app.command("build-input")
+def masks_build_input_cmd(
+    base_dir: Path = typer.Option(Path("usgs_mrms_events_data"), "--base-dir"),
+    basins_dir: Path | None = typer.Option(None, "--basins-dir"),
+    out: Path | None = typer.Option(None, "--out"),
+    overwrite: bool = typer.Option(False, "--overwrite"),
+):
+    from .masks.build_mask_input import build_mask_input
+
+    base_dir = base_dir.resolve()
+    basins_dir = basins_dir or (base_dir / "basins_json")
+    out = out or (base_dir / "masks" / "mask_input.tsv")
+
+    build_mask_input(
+        basins_dir=basins_dir,
+        out_fp=out,
+        overwrite=overwrite,
+    )
+
+
+@masks_app.command("build-state-masks")
+def masks_build_state_masks_cmd(
+    sample_grib_gz: Path = typer.Option(..., "--sample-grib-gz"),
+    base_dir: Path = typer.Option(Path("usgs_mrms_events_data"), "--base-dir"),
+    mask_input: Path | None = typer.Option(None, "--mask-input"),
+    out_dir: Path | None = typer.Option(None, "--out-dir"),
+    state: str | None = typer.Option(None, "--state"),
+    dtype: str = typer.Option("float32", "--dtype"),
+    overwrite: bool = typer.Option(False, "--overwrite"),
+):
+    from .masks.state_masks import build_state_mrms_masks
+
+    base_dir = base_dir.resolve()
+    mask_input = mask_input or (base_dir / "masks" / "mask_input.tsv")
+    out_dir = out_dir or (base_dir / "masks" / "state_mrms_masks")
+
+    build_state_mrms_masks(
+        mask_input=mask_input,
+        sample_grib_gz=sample_grib_gz,
+        out_dir=out_dir,
+        state=state,
+        dtype=dtype,
+        overwrite=overwrite,
+    )
+
+
+@masks_app.command("build-basin-masks")
+def masks_build_basin_masks_cmd(
+    sample_grib_gz: Path = typer.Option(..., "--sample-grib-gz"),
+    base_dir: Path = typer.Option(Path("usgs_mrms_events_data"), "--base-dir"),
+    mask_input: Path | None = typer.Option(None, "--mask-input"),
+    out_dir: Path | None = typer.Option(None, "--out-dir"),
+    dtype: str = typer.Option("float32", "--dtype"),
+    overwrite: bool = typer.Option(False, "--overwrite"),
+):
+    from .masks.basin_masks import build_basin_mrms_masks
+
+    base_dir = base_dir.resolve()
+    mask_input = mask_input or (base_dir / "masks" / "mask_input.tsv")
+    out_dir = out_dir or (base_dir / "masks" / "basin_mrms_masks")
+
+    build_basin_mrms_masks(
+        mask_input=mask_input,
+        sample_grib_gz=sample_grib_gz,
+        out_dir=out_dir,
+        dtype=dtype,
+        overwrite=overwrite,
+    )
+
+
+@masks_app.command("build-state-basin-index")
+def masks_build_state_basin_index_cmd(
+    sample_grib_gz: Path = typer.Option(..., "--sample-grib-gz"),
+    base_dir: Path = typer.Option(Path("usgs_mrms_events_data"), "--base-dir"),
+    mask_input: Path | None = typer.Option(None, "--mask-input"),
+    state_mask_dir: Path | None = typer.Option(None, "--state-mask-dir"),
+    out_dir: Path | None = typer.Option(None, "--out-dir"),
+    state: str | None = typer.Option(None, "--state"),
+    overwrite: bool = typer.Option(False, "--overwrite"),
+):
+    from .masks.state_basin_index import build_state_basin_index
+
+    base_dir = base_dir.resolve()
+    mask_input = mask_input or (base_dir / "masks" / "mask_input.tsv")
+    state_mask_dir = state_mask_dir or (base_dir / "masks" / "state_mrms_masks")
+    out_dir = out_dir or (base_dir / "masks" / "state_basin_index")
+
+    build_state_basin_index(
+        mask_input=mask_input,
+        state_mask_dir=state_mask_dir,
+        sample_grib_gz=sample_grib_gz,
+        out_dir=out_dir,
+        state=state,
+        overwrite=overwrite,
+    )
 
 from .ews.cli_commands import ews_app
 app.add_typer(ews_app, name="ews")
