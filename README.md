@@ -69,8 +69,19 @@ mrms-usgs masks build-state-basin-index \
 ### Extract event information (Run using tmux)
 ./run_ews_by_state_parallel.sh
 
+### Fit predictors
+mrms-usgs ews fit-predictors \
+  --summary-dir /data/repository_code/unified_data/ews_history \
+  --out-dir /data/repository_code/unified_data/ews_predictors
 
-
+### state_rain_current
+mrms-usgs ews state-rain-current \
+  --state TEXAS \
+  --state-mask "$BASE_DIR/state_masks/TEXAS_mrms_mask.npz" \
+  --out-npz "$CURRENT_RAIN_DIR/TEXAS_recent_rain.npz" \
+  --base-dir "$BASE_DIR" \
+  --hours-back 12 \
+  --workers 4
 ## Data directory with subfolders created following this structure
 data/
 
