@@ -1,131 +1,383 @@
 from __future__ import annotations
 
+import gc
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import zarr
 
 
-def safe_corr(x, y):
-    x = pd.to_numeric(x, errors="coerce")
-    y = pd.to_numeric(y, errors="coerce")
-    m = x.notna() & y.notna()
-    if m.sum() < 5:
-        return np.nan
-    return float(np.corrcoef(x[m], y[m])[0, 1])
+STRONG_RAIN_MM_H = 7.5
+MIN_EVENTS = 3
 
 
-def slope_intercept(x, y):
-    x = pd.to_numeric(x, errors="coerce").to_numpy(dtype=float)
-    y = pd.to_numeric(y, errors="coerce").to_numpy(dtype=float)
-    m = np.isfinite(x) & np.isfinite(y)
-    if m.sum() < 5:
-        return np.nan, np.nan
-    b, a = np.polyfit(x[m], y[m], 1)
-    return float(b), float(a)
+def _num(s: pd.Series) -> pd.Series:
+    return pd.to_numeric(s, errors="coerce")
 
 
-def fit_one_summary(fp: Path) -> dict:
-    df = pd.read_parquet(fp)
-    site_id = str(df["site_id"].iloc[0])
+def _q(s: pd.Series, p: float) -> float:
+    x = _num(s).replace([np.inf, -np.inf], np.nan).dropna()
+    return float(x.quantile(p)) if len(x) else np.nan
 
-    time_targets = {
-        "time_event_acc_to_stage_peak_hr": "event_acc",
-        "time_max_pixel_acc_to_stage_peak_hr": "pixel_acc",
-        "time_max_pixel_rain_to_stage_peak_hr": "pixel_rain",
-    }
 
-    candidates = []
-    for col, label in time_targets.items():
-        vals = pd.to_numeric(df[col], errors="coerce")
-        vals = vals[np.isfinite(vals)]
-        if len(vals) >= 5:
-            candidates.append({
-                "label": label,
-                "column": col,
-                "n": int(len(vals)),
-                "median": float(vals.median()),
-                "mean": float(vals.mean()),
-                "std": float(vals.std()),
-                "iqr": float(vals.quantile(0.75) - vals.quantile(0.25)),
-            })
+def _safe_ratio(a: pd.Series, b: pd.Series) -> pd.Series:
+    a = _num(a)
+    b = _num(b)
+    return pd.Series(
+        np.where((b > 0) & np.isfinite(b), a / b, np.nan),
+        index=a.index,
+    )
 
-    if candidates:
-        candidates = sorted(candidates, key=lambda d: (d["iqr"], -d["n"]))
-        best_time = candidates[0]
+
+def _read_zarr_time(root) -> pd.DatetimeIndex:
+    time_raw = root["time"][:]
+
+    if np.issubdtype(time_raw.dtype, np.datetime64):
+        time = pd.to_datetime(time_raw)
+    elif np.issubdtype(time_raw.dtype, np.integer):
+        time = pd.to_datetime(time_raw.astype("int64"), unit="ns")
     else:
-        best_time = {"label": "none", "column": "", "n": 0, "median": np.nan, "mean": np.nan, "std": np.nan, "iqr": np.nan}
+        time = pd.to_datetime(time_raw.astype(str), errors="coerce")
 
-    rain_predictors = [
-        "event_total_acc",
-        "event_max_hourly_basin_sum",
-        "max_pixel_acc",
-        "max_pixel_rain",
-        "pixel_acc_contribution_pct",
-        "max_pixel_acc_distance_to_gauge_km",
-        "max_pixel_rain_distance_to_gauge_km",
-    ]
+    return pd.DatetimeIndex(time)
 
-    stage_scores = []
-    for col in rain_predictors:
-        corr = safe_corr(df[col], df["delta_stage"])
-        slope, intercept = slope_intercept(df[col], df["delta_stage"])
-        stage_scores.append({
-            "column": col,
-            "corr_delta_stage": corr,
-            "abs_corr_delta_stage": abs(corr) if np.isfinite(corr) else np.nan,
-            "slope_delta_stage": slope,
-            "intercept_delta_stage": intercept,
-        })
 
-    stage_scores_df = pd.DataFrame(stage_scores).sort_values("abs_corr_delta_stage", ascending=False)
-    best_stage = stage_scores_df.iloc[0].to_dict() if len(stage_scores_df) else {}
+def _find_zarr_files(base_dir: Path) -> dict[str, Path]:
+    out = {}
 
-    qcols = ["event_total_acc", "event_max_hourly_basin_sum", "max_pixel_acc", "max_pixel_rain", "delta_stage"]
-    q = {}
-    for col in qcols:
-        vals = pd.to_numeric(df[col], errors="coerce")
-        for p in [0.50, 0.75, 0.90, 0.95]:
-            q[f"{col}_p{int(p*100)}"] = float(vals.quantile(p)) if vals.notna().any() else np.nan
+    for fp in sorted((base_dir / "rain_zarr").rglob("*.zarr")):
+        site_id = fp.stem
+        if site_id not in out:
+            out[site_id] = fp
 
-    out = {
-        "site_id": site_id,
-        "n_events": int(len(df)),
-        "best_travel_time_label": best_time["label"],
-        "best_travel_time_column": best_time["column"],
-        "best_travel_time_median_hr": best_time["median"],
-        "best_travel_time_mean_hr": best_time["mean"],
-        "best_travel_time_std_hr": best_time["std"],
-        "best_travel_time_iqr_hr": best_time["iqr"],
-        "best_stage_predictor": best_stage.get("column", ""),
-        "best_stage_predictor_corr": best_stage.get("corr_delta_stage", np.nan),
-        "best_stage_predictor_slope": best_stage.get("slope_delta_stage", np.nan),
-        "best_stage_predictor_intercept": best_stage.get("intercept_delta_stage", np.nan),
-        "corr_event_total_acc_delta_stage": safe_corr(df["event_total_acc"], df["delta_stage"]),
-        "corr_max_pixel_acc_delta_stage": safe_corr(df["max_pixel_acc"], df["delta_stage"]),
-        "corr_max_pixel_rain_delta_stage": safe_corr(df["max_pixel_rain"], df["delta_stage"]),
-        "corr_distance_time_pixel_acc": safe_corr(df["max_pixel_acc_distance_to_gauge_km"], df["time_max_pixel_acc_to_stage_peak_hr"]),
-        "corr_intensity_time_pixel_rain": safe_corr(df["max_pixel_rain"], df["time_max_pixel_rain_to_stage_peak_hr"]),
-    }
-    out.update(q)
     return out
 
 
-def fit_basin_predictors(*, summary_dir: Path, out_dir: Path) -> Path:
+def _event_strong_rain_features_from_zarr(
+    *,
+    rain_array,
+    rain_time: pd.DatetimeIndex,
+    start_time: pd.Timestamp,
+    end_time: pd.Timestamp,
+) -> dict:
+    mask = (rain_time >= start_time) & (rain_time <= end_time)
+    idx = np.flatnonzero(mask)
+
+    if idx.size == 0:
+        return {
+            "strong_max_pixel_rain": np.nan,
+            "strong_event_total_acc": np.nan,
+            "strong_max_pixel_acc": np.nan,
+            "strong_event_max_hourly_basin_sum": np.nan,
+            "strong_n_positive_pixels": 0,
+        }
+
+    # Read only the event window from Zarr, not the full station Zarr.
+    start_i = int(idx[0])
+    end_i = int(idx[-1]) + 1
+
+    vals = np.asarray(rain_array[start_i:end_i, :], dtype=np.float32)
+    vals = np.where(np.isfinite(vals), vals, 0.0)
+
+    strong = np.where(vals >= STRONG_RAIN_MM_H, vals, 0.0)
+
+    acc_by_pixel = strong.sum(axis=0, dtype=np.float64)
+    hourly_basin_sum = strong.sum(axis=1, dtype=np.float64)
+
+    out = {
+        "strong_max_pixel_rain": float(strong.max()) if strong.size else np.nan,
+        "strong_event_total_acc": float(strong.sum(dtype=np.float64)),
+        "strong_max_pixel_acc": float(acc_by_pixel.max()) if acc_by_pixel.size else np.nan,
+        "strong_event_max_hourly_basin_sum": float(hourly_basin_sum.max()) if hourly_basin_sum.size else np.nan,
+        "strong_n_positive_pixels": int(np.count_nonzero(acc_by_pixel > 0)),
+    }
+
+    del vals, strong, acc_by_pixel, hourly_basin_sum
+    return out
+
+
+def fit_one_summary(
+    fp: Path,
+    *,
+    base_dir: Path,
+    zarr_index: dict[str, Path],
+) -> dict:
+    df = pd.read_parquet(fp).copy()
+
+    if df.empty:
+        raise ValueError(f"Empty summary: {fp}")
+
+    site_id = str(df["site_id"].iloc[0])
+
+    required = [
+        "date_peak",
+        "effective_start_rain",
+        "delta_stage",
+        "time_max_pixel_rain_to_stage_peak_hr",
+        "time_max_pixel_acc_to_stage_peak_hr",
+        "max_pixel_rain_distance_to_gauge_km",
+        "max_pixel_acc_distance_to_gauge_km",
+    ]
+
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"{site_id}: missing columns: {missing}")
+
+    df["date_peak"] = pd.to_datetime(df["date_peak"])
+    df["effective_start_rain"] = pd.to_datetime(df["effective_start_rain"])
+    df["delta_stage"] = _num(df["delta_stage"])
+
+    delta_stage_target_p50 = _q(df["delta_stage"], 0.50)
+    df["target_stage_response_p50"] = df["delta_stage"] >= delta_stage_target_p50
+
+    zarr_fp = zarr_index.get(site_id)
+    if zarr_fp is None:
+        raise FileNotFoundError(f"No zarr found for site_id={site_id}")
+
+    root = zarr.open_group(str(zarr_fp), mode="r")
+    rain_array = root["rain"]
+    rain_time = _read_zarr_time(root)
+
+    strong_rows = []
+
+    severe_df = df[df["target_stage_response_p50"]].copy()
+
+    for _, row in severe_df.iterrows():
+        features = _event_strong_rain_features_from_zarr(
+            rain_array=rain_array,
+            rain_time=rain_time,
+            start_time=pd.Timestamp(row["effective_start_rain"]),
+            end_time=pd.Timestamp(row["date_peak"]),
+        )
+
+        strong_rows.append(
+            {
+                "site_id": site_id,
+                "date_peak": row["date_peak"],
+                "delta_stage": row["delta_stage"],
+                "time_max_pixel_rain_to_stage_peak_hr": row[
+                    "time_max_pixel_rain_to_stage_peak_hr"
+                ],
+                "time_max_pixel_acc_to_stage_peak_hr": row[
+                    "time_max_pixel_acc_to_stage_peak_hr"
+                ],
+                "max_pixel_rain_distance_to_gauge_km": row[
+                    "max_pixel_rain_distance_to_gauge_km"
+                ],
+                "max_pixel_acc_distance_to_gauge_km": row[
+                    "max_pixel_acc_distance_to_gauge_km"
+                ],
+                **features,
+            }
+        )
+
+    del root, rain_array, rain_time
+
+    severe = pd.DataFrame(strong_rows)
+
+    if severe.empty:
+        return {
+            "site_id": site_id,
+            "alert_ready": False,
+            "n_events": int(len(df)),
+            "n_stage_response_events_p50": 0,
+            "n_stage_response_events_with_strong_rain": 0,
+            "delta_stage_target_p50": delta_stage_target_p50,
+            "strong_rain_filter_mm_h": STRONG_RAIN_MM_H,
+        }
+
+    severe = severe.replace([np.inf, -np.inf], np.nan)
+
+    severe_rain = severe[
+        severe["strong_max_pixel_rain"].fillna(0.0) >= STRONG_RAIN_MM_H
+    ].copy()
+
+    alert_ready = len(severe_rain) >= MIN_EVENTS
+    calib = severe_rain.copy()
+
+    calib["velocity_from_stage1_km_h"] = _safe_ratio(
+        calib["max_pixel_rain_distance_to_gauge_km"],
+        calib["time_max_pixel_rain_to_stage_peak_hr"],
+    )
+
+    calib["velocity_from_stage2_km_h"] = _safe_ratio(
+        calib["max_pixel_acc_distance_to_gauge_km"],
+        calib["time_max_pixel_acc_to_stage_peak_hr"],
+    )
+
+    calib["stage1_vs_stage2_lead_advantage_hr"] = (
+        _num(calib["time_max_pixel_rain_to_stage_peak_hr"])
+        - _num(calib["time_max_pixel_acc_to_stage_peak_hr"])
+    )
+
+    out = {
+        "site_id": site_id,
+        "alert_ready": bool(alert_ready),
+        "n_events": int(len(df)),
+        "n_stage_response_events_p50": int(len(severe)),
+        "n_stage_response_events_with_strong_rain": int(len(severe_rain)),
+        "delta_stage_target_p50": delta_stage_target_p50,
+        "strong_rain_filter_mm_h": STRONG_RAIN_MM_H,
+
+        "stage1_signal": "current_strong_max_pixel_rain",
+        "stage1_strong_max_pixel_rain_threshold": max(
+            STRONG_RAIN_MM_H,
+            _q(calib["strong_max_pixel_rain"], 0.50),
+        ),
+
+        "stage2_signal_primary": "current_strong_event_total_acc",
+        "stage2_strong_event_total_acc_threshold": _q(
+            calib["strong_event_total_acc"], 0.50
+        ),
+
+        "stage2_signal_secondary": "current_strong_max_pixel_acc",
+        "stage2_strong_max_pixel_acc_threshold": _q(
+            calib["strong_max_pixel_acc"], 0.50
+        ),
+
+        "stage2_signal_hourly_basin": "current_strong_event_max_hourly_basin_sum",
+        "stage2_strong_event_max_hourly_basin_sum_threshold": _q(
+            calib["strong_event_max_hourly_basin_sum"], 0.50
+        ),
+
+        "stage1_expected_lead_time_median_hr": _q(
+            calib["time_max_pixel_rain_to_stage_peak_hr"], 0.50
+        ),
+        "stage1_expected_lead_time_p25_hr": _q(
+            calib["time_max_pixel_rain_to_stage_peak_hr"], 0.25
+        ),
+        "stage1_expected_lead_time_p75_hr": _q(
+            calib["time_max_pixel_rain_to_stage_peak_hr"], 0.75
+        ),
+
+        "stage2_expected_lead_time_median_hr": _q(
+            calib["time_max_pixel_acc_to_stage_peak_hr"], 0.50
+        ),
+        "stage2_expected_lead_time_p25_hr": _q(
+            calib["time_max_pixel_acc_to_stage_peak_hr"], 0.25
+        ),
+        "stage2_expected_lead_time_p75_hr": _q(
+            calib["time_max_pixel_acc_to_stage_peak_hr"], 0.75
+        ),
+
+        "expected_velocity_from_stage1_median_km_h": _q(
+            calib["velocity_from_stage1_km_h"], 0.50
+        ),
+        "expected_velocity_from_stage1_p25_km_h": _q(
+            calib["velocity_from_stage1_km_h"], 0.25
+        ),
+        "expected_velocity_from_stage1_p75_km_h": _q(
+            calib["velocity_from_stage1_km_h"], 0.75
+        ),
+
+        "expected_velocity_from_stage2_median_km_h": _q(
+            calib["velocity_from_stage2_km_h"], 0.50
+        ),
+
+        "stage1_vs_stage2_lead_advantage_median_hr": _q(
+            calib["stage1_vs_stage2_lead_advantage_hr"], 0.50
+        ),
+        "stage1_vs_stage2_lead_advantage_p75_hr": _q(
+            calib["stage1_vs_stage2_lead_advantage_hr"], 0.75
+        ),
+    }
+
+    del df, severe_df, severe, severe_rain, calib
+    gc.collect()
+
+    return out
+
+
+def fit_basin_predictors(
+    *,
+    summary_dir: Path,
+    out_dir: Path,
+) -> Path:
+    summary_dir = Path(summary_dir)
+    out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    base_dir = summary_dir.parent
     files = sorted(summary_dir.glob("*_historical_event_summary.parquet"))
+
+    print("=" * 100)
+    print("FITTING STRONG-RAIN OPERATIONAL PREDICTORS")
+    print("=" * 100)
+    print(f"summary_dir : {summary_dir}")
+    print(f"base_dir    : {base_dir}")
+    print(f"out_dir     : {out_dir}")
+    print(f"strong rain : >= {STRONG_RAIN_MM_H} mm/h")
+    print(f"files       : {len(files)}")
+
+    zarr_index = _find_zarr_files(base_dir)
+    print(f"zarr files  : {len(zarr_index)}")
+
     rows = []
 
     for i, fp in enumerate(files, start=1):
         try:
-            rows.append(fit_one_summary(fp))
-            if i % 100 == 0:
-                print(f"[{i}/{len(files)}] fitted")
+            rows.append(
+                fit_one_summary(
+                    fp,
+                    base_dir=base_dir,
+                    zarr_index=zarr_index,
+                )
+            )
         except Exception as e:
             print(f"[ERROR] {fp.name}: {type(e).__name__}: {e}")
 
-    models = pd.DataFrame(rows)
-    out_fp = out_dir / "basin_predictors.parquet"
-    models.to_parquet(out_fp, index=False)
-    models.to_csv(out_dir / "basin_predictors.csv", index=False)
-    return out_fp
+        if i % 50 == 0:
+            gc.collect()
+            print(f"[{i}/{len(files)}] processed")
+
+    predictors = pd.DataFrame(rows)
+
+    preferred = [
+        "site_id",
+        "alert_ready",
+        "n_events",
+        "n_stage_response_events_p50",
+        "n_stage_response_events_with_strong_rain",
+        "delta_stage_target_p50",
+        "strong_rain_filter_mm_h",
+        "stage1_signal",
+        "stage1_strong_max_pixel_rain_threshold",
+        "stage1_expected_lead_time_median_hr",
+        "stage1_expected_lead_time_p25_hr",
+        "stage1_expected_lead_time_p75_hr",
+        "expected_velocity_from_stage1_median_km_h",
+        "expected_velocity_from_stage1_p25_km_h",
+        "expected_velocity_from_stage1_p75_km_h",
+        "stage2_signal_primary",
+        "stage2_strong_event_total_acc_threshold",
+        "stage2_signal_secondary",
+        "stage2_strong_max_pixel_acc_threshold",
+        "stage2_signal_hourly_basin",
+        "stage2_strong_event_max_hourly_basin_sum_threshold",
+        "stage2_expected_lead_time_median_hr",
+        "stage2_expected_lead_time_p25_hr",
+        "stage2_expected_lead_time_p75_hr",
+        "expected_velocity_from_stage2_median_km_h",
+        "stage1_vs_stage2_lead_advantage_median_hr",
+        "stage1_vs_stage2_lead_advantage_p75_hr",
+    ]
+
+    cols = [c for c in preferred if c in predictors.columns]
+    rest = [c for c in predictors.columns if c not in cols]
+    predictors = predictors[cols + rest]
+
+    parquet_fp = out_dir / "basin_operational_alert_predictors.parquet"
+    csv_fp = out_dir / "basin_operational_alert_predictors.csv"
+
+    predictors.to_parquet(parquet_fp, index=False)
+    predictors.to_csv(csv_fp, index=False)
+
+    print("=" * 100)
+    print("DONE")
+    print("=" * 100)
+    print(f"parquet: {parquet_fp}")
+    print(f"csv    : {csv_fp}")
+    print(f"rows   : {len(predictors)}")
+
+    return parquet_fp

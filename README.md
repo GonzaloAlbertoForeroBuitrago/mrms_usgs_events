@@ -41,13 +41,64 @@ gdalinfo --formats | grep -i grib                 # Verify gdal grib
 
 mrms-usgs --help                                  # Verify installation
 
-## Example use for the Texas July 4 2025 event at the Mystic Camp. (Use at least 1 year between start and end) 
+### Example use for the Texas July 4 2025 event at the Mystic Camp. (Use at least 1 year between start and end) 
 
 mrms-usgs run-site 08165500 \
   --start 2023-07-01 \
   --end 2025-07-10 \
   --base-dir data \
   --overwrite
+
+### Create input tsv
+mrms-usgs masks build-input
+--basins-dir "$BASE_DIR/basins_json"
+--out "$MASK_INPUT"
+--overwrite
+
+### mrms-usgs masks build-state-masks 
+mrms-usgs masks build-state-masks
+--sample-grib-gz "$SAMPLE_GRIB"
+--mask-input "$MASK_INPUT"
+--out-dir "$STATE_MASK_DIR"
+--overwrite
+
+### Create state basin index
+mrms-usgs masks build-state-basin-index
+--sample-grib-gz "$SAMPLE_GRIB"
+--mask-input "$MASK_INPUT"
+--state-mask-dir "$STATE_MASK_DIR"
+--out-dir "$STATE_INDEX_DIR"
+--overwrite
+
+### Extract historical event information (Run using tmux)
+./run_ews_by_state_parallel.sh
+
+### Training engine, filter data
+mrms-usgs ews fit-predictors \
+  --summary-dir "$BASE_DIR/ews_history" \
+  --out-dir "$BASE_DIR/ews_predictors"
+
+### Download state current rainfall (Texas example)
+BASE_DIR="/data/repository_code/unified_data"
+STATE="TEXAS"
+
+mkdir -p "$BASE_DIR/current_rain"
+
+mrms-usgs ews state-rain-current \
+  --state "$STATE" \
+  --state-mask "$BASE_DIR/state_masks/${STATE}_mrms_mask.npz" \
+  --out-npz "$BASE_DIR/current_rain/${STATE}_current_rain.npz" \
+  --base-dir "$BASE_DIR" \
+  --hours-back 12 \
+  --workers 6
+
+### Run state alerts (Texas Example)
+mrms-usgs ews run-state \
+  --state "$STATE" \
+  --recent-rain-npz "$BASE_DIR/current_rain/${STATE}_current_rain.npz" \
+  --state-basin-index "$BASE_DIR/state_basin_index/${STATE}_state_basin_index.npz" \
+  --predictor-dir "$BASE_DIR/ews_predictors" \
+  --out-dir "$BASE_DIR/ews_alerts/${STATE}"
 ## Data directory with subfolders created following this structure
 data/
 
