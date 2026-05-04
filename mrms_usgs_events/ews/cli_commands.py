@@ -84,3 +84,112 @@ def ews_state_rain_current_cmd(
         end=end,
     )
     typer.echo(f"Saved: {out}")
+
+@ews_app.command("build-pixel-response-many")
+def ews_build_pixel_response_many_cmd(
+    base_dir: Path = typer.Option(Path("/data/repository_code/unified_data"), "--base-dir"),
+    state: str | None = typer.Option(None, "--state"),
+    script: Path | None = typer.Option(None, "--script"),
+    out_dir: Path | None = typer.Option(None, "--out-dir"),
+    log_dir: Path | None = typer.Option(None, "--log-dir"),
+    overwrite: bool = typer.Option(False, "--overwrite"),
+    limit: int | None = typer.Option(None, "--limit"),
+):
+    from .pixel_response import run_pixel_response_many
+
+    result = run_pixel_response_many(
+        base_dir=base_dir,
+        state=state,
+        script=script,
+        out_dir=out_dir,
+        log_dir=log_dir,
+        overwrite=overwrite,
+        limit=limit,
+    )
+    typer.echo(result)
+
+
+@ews_app.command("build-pixel-signatures")
+def ews_build_pixel_signatures_cmd(
+    base_dir: Path = typer.Option(Path("/data/repository_code/unified_data"), "--base-dir"),
+    state: str | None = typer.Option(None, "--state"),
+    pixel_response_dir: Path | None = typer.Option(None, "--pixel-response-dir"),
+    out_dir: Path | None = typer.Option(None, "--out-dir"),
+    overwrite: bool = typer.Option(False, "--overwrite"),
+    limit: int | None = typer.Option(None, "--limit"),
+):
+    from .pixel_signatures import build_pixel_signatures_many
+
+    result = build_pixel_signatures_many(
+        base_dir=base_dir,
+        state=state,
+        pixel_response_dir=pixel_response_dir,
+        out_dir=out_dir,
+        overwrite=overwrite,
+        limit=limit,
+    )
+    typer.echo(result)
+
+
+@ews_app.command("export-state-tethys")
+def ews_export_state_tethys_cmd(
+    state: str = typer.Option(..., "--state"),
+    base_dir: Path = typer.Option(Path("/data/repository_code/unified_data"), "--base-dir"),
+    alerts_parquet: Path | None = typer.Option(None, "--alerts-parquet"),
+    out_dir: Path | None = typer.Option(None, "--out-dir"),
+    public_dir: Path | None = typer.Option(None, "--public-dir"),
+):
+    from .tethys_outputs import export_state_alerts_for_tethys
+
+    result = export_state_alerts_for_tethys(
+        state=state,
+        base_dir=base_dir,
+        alerts_parquet=alerts_parquet,
+        out_dir=out_dir,
+        public_dir=public_dir,
+    )
+    typer.echo(result)
+
+
+@ews_app.command("run-state-tethys")
+def ews_run_state_tethys_cmd(
+    state: str = typer.Option(..., "--state"),
+    base_dir: Path = typer.Option(Path("/data/repository_code/unified_data"), "--base-dir"),
+    hours_back: int = typer.Option(12, "--hours-back"),
+    workers: int = typer.Option(4, "--workers"),
+    public_dir: Path | None = typer.Option(None, "--public-dir"),
+    start: str | None = typer.Option(None, "--start"),
+    end: str | None = typer.Option(None, "--end"),
+):
+    from .tethys_service import run_state_current_alert_for_tethys
+
+    result = run_state_current_alert_for_tethys(
+        state=state,
+        base_dir=base_dir,
+        hours_back=hours_back,
+        workers=workers,
+        public_dir=public_dir,
+        start=start,
+        end=end,
+    )
+    typer.echo(result)
+@ews_app.command("build-pixel-response-one")
+def ews_build_pixel_response_one_cmd(
+    site_id: str = typer.Option(..., "--site-id"),
+    base_dir: Path = typer.Option(Path("/data/repository_code/unified_data"), "--base-dir"),
+    script: Path | None = typer.Option(None, "--script"),
+    out_dir: Path | None = typer.Option(None, "--out-dir"),
+    log_dir: Path | None = typer.Option(None, "--log-dir"),
+    overwrite: bool = typer.Option(False, "--overwrite"),
+):
+    from .pixel_response import run_pixel_response_one
+
+    out_fp = run_pixel_response_one(
+        site_id=site_id,
+        base_dir=base_dir,
+        script=script,
+        out_dir=out_dir,
+        log_dir=log_dir,
+        overwrite=overwrite,
+    )
+    typer.echo(f"output: {out_fp}")
