@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import gc
 
 import numpy as np
 import pandas as pd
@@ -9,15 +10,17 @@ import zarr
 from .common import (
     build_window_indices,
     find_site_paths,
-    haversine_km,
     hours_between,
     load_meta_gauge_latlon,
     to_naive_timestamp,
 )
 
+STRONG_RAIN_MM_H = 7.5
+
 
 def load_events(events_fp: Path) -> pd.DataFrame:
     events = pd.read_csv(events_fp, parse_dates=["date_peak", "start_rain", "end_rain"])
+
     if events.empty:
         raise ValueError(f"Events file is empty: {events_fp}")
 
@@ -25,8 +28,9 @@ def load_events(events_fp: Path) -> pd.DataFrame:
         events[col] = pd.to_datetime(events[col], errors="coerce").map(to_naive_timestamp)
 
     events["flow_peak"] = pd.to_numeric(events.get("flow_peak", np.nan), errors="coerce")
-    events = events.sort_values("date_peak").reset_index(drop=True)
+    events = events.dropna(subset=["date_peak", "start_rain"]).sort_values("date_peak").reset_index(drop=True)
     events["event_id"] = np.arange(1, len(events) + 1, dtype=np.int64)
+
     return events
 
 
@@ -35,18 +39,17 @@ def load_stage(stage_fp: Path) -> pd.DataFrame:
     stage["datetime"] = pd.to_datetime(stage["datetime"], errors="coerce").map(to_naive_timestamp)
     stage["Stage_ft"] = pd.to_numeric(stage["Stage_ft"], errors="coerce")
     stage = stage.dropna(subset=["datetime"]).sort_values("datetime").reset_index(drop=True)
+
     if stage.empty:
         raise ValueError(f"Stage parquet has no valid rows: {stage_fp}")
+
     return stage
 
 
-def load_rain_zarr(zarr_fp: Path) -> dict[str, np.ndarray | pd.DatetimeIndex]:
+def load_rain_zarr(zarr_fp: Path) -> dict:
     root = zarr.open_group(str(zarr_fp), mode="r")
-    time_raw = root["time"][:]
-    lat = np.asarray(root["lat"][:], dtype=np.float64)
-    lon = np.asarray(root["lon"][:], dtype=np.float64)
-    rain = np.asarray(root["rain"][:], dtype=np.float32)
 
+    time_raw = root["time"][:]
     if np.issubdtype(time_raw.dtype, np.datetime64):
         time = pd.to_datetime(time_raw)
     elif np.issubdtype(time_raw.dtype, np.integer):
@@ -55,186 +58,294 @@ def load_rain_zarr(zarr_fp: Path) -> dict[str, np.ndarray | pd.DatetimeIndex]:
         time = pd.to_datetime(time_raw.astype("U"), errors="coerce")
 
     time = pd.DatetimeIndex(time).map(to_naive_timestamp)
-    rain = np.where(np.isfinite(rain), rain, 0.0).astype(np.float32, copy=False)
-    return {"time": time, "lat": lat, "lon": lon, "rain": rain}
+
+    return {
+        "root": root,
+        "time": pd.DatetimeIndex(time),
+        "lat": np.asarray(root["lat"][:], dtype=np.float64),
+        "lon": np.asarray(root["lon"][:], dtype=np.float64),
+        "rain": root["rain"],
+    }
 
 
-def build_match(events: pd.DataFrame, rain_time: pd.DatetimeIndex, rain: np.ndarray) -> pd.DataFrame:
+def build_matched_events(
+    events: pd.DataFrame,
+    stage: pd.DataFrame,
+    rain_time: pd.DatetimeIndex,
+) -> pd.DataFrame:
     matched = events.copy()
+
     matched["prev_stage_peak_time"] = matched["date_peak"].shift(1)
     matched["effective_start_rain"] = matched[["start_rain", "prev_stage_peak_time"]].max(axis=1)
     matched["effective_start_rain"] = matched["effective_start_rain"].fillna(matched["start_rain"])
     matched["overlap_trimmed"] = matched["effective_start_rain"] > matched["start_rain"]
 
-    r0, r1 = build_window_indices(rain_time, matched["effective_start_rain"], matched["date_peak"])
-    matched["rain_window_start_idx"] = r0
-    matched["rain_window_end_idx"] = r1
+    r0, r1 = build_window_indices(
+        rain_time,
+        matched["effective_start_rain"],
+        matched["date_peak"],
+    )
+
+    matched["rain_window_start_idx"] = r0.astype(np.int64)
+    matched["rain_window_end_idx"] = r1.astype(np.int64)
     matched["rain_window_n_steps"] = np.maximum(r1 - r0, 0).astype(np.int32)
-    matched["window_has_positive_rain"] = [(b > a) and np.any(rain[a:b] > 0.0) for a, b in zip(r0, r1)]
+
+    stage_time = pd.DatetimeIndex(stage["datetime"])
+    stage_vals = stage["Stage_ft"].to_numpy(dtype=np.float64)
+
+    s0, _ = build_window_indices(
+        stage_time,
+        matched["effective_start_rain"],
+        matched["date_peak"],
+    )
+
+    flow_start = np.full(len(matched), np.nan, dtype=np.float64)
+    valid = s0 < len(stage_vals)
+
+    if len(stage_vals):
+        clipped = np.clip(s0, 0, len(stage_vals) - 1)
+        flow_start[valid] = stage_vals[clipped[valid]]
+
+    matched["flow_start"] = flow_start
+    matched["delta_water_stage"] = matched["flow_peak"].to_numpy(dtype=np.float64) - flow_start
+
+    matched["event_duration_hr"] = hours_between(
+        matched["effective_start_rain"].to_numpy(dtype="datetime64[ns]"),
+        matched["date_peak"].to_numpy(dtype="datetime64[ns]"),
+    )
+
+    p50 = matched["delta_water_stage"].replace([np.inf, -np.inf], np.nan).dropna().quantile(0.50)
+    matched["delta_water_stage_p50"] = float(p50) if np.isfinite(p50) else np.nan
+    matched["is_stage_response_p50"] = matched["delta_water_stage"] >= matched["delta_water_stage_p50"]
+
     return matched
 
 
-def compute_event_summary(
+def compute_site_historical_tables(
     *,
+    state: str,
     site_id: str,
     matched: pd.DataFrame,
-    stage_df: pd.DataFrame,
     rain_time: pd.DatetimeIndex,
-    rain: np.ndarray,
+    rain_array,
     pixel_lat: np.ndarray,
     pixel_lon: np.ndarray,
     gauge_lat: float,
     gauge_lon: float,
-) -> pd.DataFrame:
-    stage_time = pd.DatetimeIndex(stage_df["datetime"])
-    stage_vals = stage_df["Stage_ft"].to_numpy(dtype=np.float64)
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     rain_time_arr = rain_time.to_numpy(dtype="datetime64[ns]")
 
-    r0 = matched["rain_window_start_idx"].to_numpy(dtype=np.int64)
-    r1 = matched["rain_window_end_idx"].to_numpy(dtype=np.int64)
-    peak_times = matched["date_peak"].to_numpy(dtype="datetime64[ns]")
-    start_times = matched["effective_start_rain"].to_numpy(dtype="datetime64[ns]")
+    basin_rows = []
+    pixel_chunks = []
 
-    s0, _ = build_window_indices(stage_time, matched["effective_start_rain"], matched["date_peak"])
-    flow_start = np.full(len(matched), np.nan, dtype=np.float64)
-    valid_stage = s0 < len(stage_vals)
-    clipped = np.clip(s0, 0, max(len(stage_vals) - 1, 0))
-    flow_start[valid_stage] = stage_vals[clipped[valid_stage]]
+    for _, ev in matched.iterrows():
+        a = int(ev["rain_window_start_idx"])
+        b = int(ev["rain_window_end_idx"])
 
-    flow_peak = matched["flow_peak"].to_numpy(dtype=np.float64)
-    delta_stage = flow_peak - flow_start
-    event_duration_hr = hours_between(start_times, peak_times)
-
-    rows = []
-    n_pixels = rain.shape[1]
-    dist_to_gauge = haversine_km(gauge_lat, gauge_lon, pixel_lat, pixel_lon)
-
-    for i, (a, b) in enumerate(zip(r0, r1)):
         if b <= a:
             continue
 
-        block = np.where(rain[a:b, :] > 0.0, rain[a:b, :], 0.0).astype(np.float32, copy=False)
+        block = np.asarray(rain_array[a:b, :], dtype=np.float32)
+        block = np.where(np.isfinite(block) & (block > 0), block, 0.0).astype(np.float32, copy=False)
+
         if not np.any(block):
             continue
 
         t = rain_time_arr[a:b]
+        peak_time = np.datetime64(pd.Timestamp(ev["date_peak"]).to_datetime64())
+
         basin_hourly_sum = block.sum(axis=1, dtype=np.float64)
-        event_cum = np.cumsum(basin_hourly_sum)
-        event_total_acc = float(event_cum[-1])
-        idx_event_acc_peak = int(np.argmax(event_cum))
-        time_event_acc_to_stage_peak_hr = float(
+        basin_accumulation = float(basin_hourly_sum.sum())
+
+        pixel_accumulation = block.sum(axis=0, dtype=np.float64)
+        pixel_value = block.max(axis=0)
+
+        pixel_peak_idx = np.argmax(block, axis=0)
+        pixel_peak_time = t[pixel_peak_idx]
+
+        time_to_stage_peak = hours_between(pixel_peak_time, np.full(len(pixel_peak_time), peak_time))
+
+        cumulative_basin = np.cumsum(basin_hourly_sum)
+        basin_acc_peak_idx = int(np.argmax(cumulative_basin))
+        basin_acc_peak_time = t[basin_acc_peak_idx]
+
+        time_to_rain_peak_accumulation = float(
             hours_between(
-                np.array([t[idx_event_acc_peak]], dtype="datetime64[ns]"),
-                np.array([peak_times[i]], dtype="datetime64[ns]"),
+                np.array([basin_acc_peak_time], dtype="datetime64[ns]"),
+                np.array([peak_time], dtype="datetime64[ns]"),
             )[0]
         )
 
-        pixel_acc_total = block.sum(axis=0, dtype=np.float64)
-        max_pixel_acc_idx = int(np.argmax(pixel_acc_total))
-        max_pixel_acc = float(pixel_acc_total[max_pixel_acc_idx])
+        positive = pixel_accumulation > 0
+        strong = pixel_value >= STRONG_RAIN_MM_H
 
-        flat_idx = int(np.argmax(block))
-        idx_time_max_pixel, idx_pixel_inst = np.unravel_index(flat_idx, block.shape)
-        max_pixel_rain = float(block[idx_time_max_pixel, idx_pixel_inst])
-        time_max_pixel_to_stage_peak_hr = float(
-            hours_between(
-                np.array([t[idx_time_max_pixel]], dtype="datetime64[ns]"),
-                np.array([peak_times[i]], dtype="datetime64[ns]"),
-            )[0]
+        n_pixels = int(block.shape[1])
+        n_positive_pixels = int(np.count_nonzero(positive))
+        n_strong_pixels = int(np.count_nonzero(strong))
+
+        basin_rows.append(
+            {
+                "state": state,
+                "site_id": str(site_id),
+                "event_id": int(ev["event_id"]),
+                "date_peak": pd.Timestamp(ev["date_peak"]),
+                "event_start": pd.Timestamp(ev["effective_start_rain"]),
+                "event_end": pd.Timestamp(ev["date_peak"]),
+                "event_duration_hr": float(ev["event_duration_hr"]),
+                "flow_start": float(ev["flow_start"]) if np.isfinite(ev["flow_start"]) else np.nan,
+                "flow_peak": float(ev["flow_peak"]) if np.isfinite(ev["flow_peak"]) else np.nan,
+                "delta_water_stage": float(ev["delta_water_stage"]) if np.isfinite(ev["delta_water_stage"]) else np.nan,
+                "delta_water_stage_p50": float(ev["delta_water_stage_p50"]) if np.isfinite(ev["delta_water_stage_p50"]) else np.nan,
+                "is_stage_response_p50": bool(ev["is_stage_response_p50"]),
+                "basin_accumulation": basin_accumulation,
+                "basin_max_hourly_accumulation": float(basin_hourly_sum.max()),
+                "time_to_rain_peak_accumulation_hr": time_to_rain_peak_accumulation,
+                "max_pixel_value": float(pixel_value.max()),
+                "max_pixel_accumulation": float(pixel_accumulation.max()),
+                "n_pixels": n_pixels,
+                "n_positive_pixels": n_positive_pixels,
+                "n_strong_pixels": n_strong_pixels,
+                "strong_rain_threshold_mm_h": STRONG_RAIN_MM_H,
+                "gauge_lat": float(gauge_lat),
+                "gauge_lon": float(gauge_lon),
+            }
         )
 
-        pixel_cum = np.cumsum(block[:, max_pixel_acc_idx], dtype=np.float64)
-        idx_pixel_acc_peak_time = int(np.argmax(pixel_cum))
-        time_max_pixel_acc_to_stage_peak_hr = float(
-            hours_between(
-                np.array([t[idx_pixel_acc_peak_time]], dtype="datetime64[ns]"),
-                np.array([peak_times[i]], dtype="datetime64[ns]"),
-            )[0]
+        keep = positive | strong
+
+        if not np.any(keep):
+            continue
+
+        pixel_id_basin = np.flatnonzero(keep)
+
+        pixel_df = pd.DataFrame(
+            {
+                "state": state,
+                "site_id": str(site_id),
+                "event_id": int(ev["event_id"]),
+                "date_peak": pd.Timestamp(ev["date_peak"]),
+                "event_start": pd.Timestamp(ev["effective_start_rain"]),
+                "event_end": pd.Timestamp(ev["date_peak"]),
+                "pixel_id_basin": pixel_id_basin.astype(np.int32),
+                "lat": pixel_lat[pixel_id_basin].astype(np.float64),
+                "lon": pixel_lon[pixel_id_basin].astype(np.float64),
+                "pixel_value": pixel_value[pixel_id_basin].astype(np.float32),
+                "pixel_accumulation": pixel_accumulation[pixel_id_basin].astype(np.float32),
+                "basin_accumulation": np.float32(basin_accumulation),
+                "delta_water_stage": np.float32(ev["delta_water_stage"]) if np.isfinite(ev["delta_water_stage"]) else np.nan,
+                "delta_water_stage_p50": np.float32(ev["delta_water_stage_p50"]) if np.isfinite(ev["delta_water_stage_p50"]) else np.nan,
+                "is_stage_response_p50": bool(ev["is_stage_response_p50"]),
+                "time_to_rain_peak_accumulation_hr": np.float32(time_to_rain_peak_accumulation),
+                "time_to_stage_peak_hr": time_to_stage_peak[pixel_id_basin].astype(np.float32),
+                "is_strong_pixel": strong[pixel_id_basin],
+                "strong_rain_threshold_mm_h": np.float32(STRONG_RAIN_MM_H),
+            }
         )
 
-        pixel_acc_contribution_pct = 100.0 * max_pixel_acc / event_total_acc if event_total_acc > 0 else np.nan
-        stage_contribution_proxy_pct = pixel_acc_contribution_pct if np.isfinite(delta_stage[i]) and delta_stage[i] > 0 else np.nan
+        pixel_chunks.append(pixel_df)
 
-        rows.append({
-            "site_id": site_id,
-            "event_id": int(matched.loc[i, "event_id"]),
-            "date_peak": pd.Timestamp(peak_times[i]),
-            "effective_start_rain": pd.Timestamp(start_times[i]),
-            "event_duration_hr": float(event_duration_hr[i]),
-            "flow_start": float(flow_start[i]) if np.isfinite(flow_start[i]) else np.nan,
-            "flow_peak": float(flow_peak[i]) if np.isfinite(flow_peak[i]) else np.nan,
-            "delta_stage": float(delta_stage[i]) if np.isfinite(delta_stage[i]) else np.nan,
-            "event_total_acc": event_total_acc,
-            "event_max_hourly_basin_sum": float(np.max(basin_hourly_sum)),
-            "time_event_acc_to_stage_peak_hr": time_event_acc_to_stage_peak_hr,
-            "max_pixel_acc": max_pixel_acc,
-            "max_pixel_acc_pixel_id": int(max_pixel_acc_idx),
-            "max_pixel_acc_lat": float(pixel_lat[max_pixel_acc_idx]),
-            "max_pixel_acc_lon": float(pixel_lon[max_pixel_acc_idx]),
-            "max_pixel_acc_distance_to_gauge_km": float(dist_to_gauge[max_pixel_acc_idx]),
-            "time_max_pixel_acc_to_stage_peak_hr": time_max_pixel_acc_to_stage_peak_hr,
-            "max_pixel_rain": max_pixel_rain,
-            "max_pixel_rain_pixel_id": int(idx_pixel_inst),
-            "max_pixel_rain_lat": float(pixel_lat[idx_pixel_inst]),
-            "max_pixel_rain_lon": float(pixel_lon[idx_pixel_inst]),
-            "max_pixel_rain_distance_to_gauge_km": float(dist_to_gauge[idx_pixel_inst]),
-            "time_max_pixel_rain_to_stage_peak_hr": time_max_pixel_to_stage_peak_hr,
-            "time_diff_pixel_rain_vs_event_acc_hr": time_max_pixel_to_stage_peak_hr - time_event_acc_to_stage_peak_hr,
-            "time_diff_pixel_acc_vs_event_acc_hr": time_max_pixel_acc_to_stage_peak_hr - time_event_acc_to_stage_peak_hr,
-            "pixel_acc_contribution_pct": float(pixel_acc_contribution_pct),
-            "stage_contribution_proxy_pct": float(stage_contribution_proxy_pct),
-            "n_pixels": int(n_pixels),
-            "n_positive_pixels": int(np.sum(pixel_acc_total > 0.0)),
-        })
+        del block, pixel_df
+        gc.collect()
 
-    return pd.DataFrame(rows)
+    basin_df = pd.DataFrame(basin_rows)
+    pixel_df = pd.concat(pixel_chunks, ignore_index=True) if pixel_chunks else pd.DataFrame()
+
+    return basin_df, pixel_df
 
 
-def build_site_historical_summary(*, base_dir: Path, site_id: str, out_dir: Path, overwrite: bool = False) -> Path | None:
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_fp = out_dir / f"{site_id}_historical_event_summary.parquet"
-    if out_fp.exists() and not overwrite:
-        return out_fp
+def build_site_historical_summary(
+    *,
+    base_dir: Path,
+    site_id: str,
+    out_dir: Path,
+    state: str | None = None,
+    overwrite: bool = False,
+) -> dict[str, Path] | None:
+    out_dir = Path(out_dir)
+    basin_out_dir = out_dir / "basin_event_history"
+    pixel_out_dir = out_dir / "pixel_event_history"
+
+    basin_out_dir.mkdir(parents=True, exist_ok=True)
+    pixel_out_dir.mkdir(parents=True, exist_ok=True)
+
+    basin_fp = basin_out_dir / f"{site_id}_basin_event_history.parquet"
+    pixel_fp = pixel_out_dir / f"{site_id}_pixel_event_history.parquet"
+
+    if basin_fp.exists() and pixel_fp.exists() and not overwrite:
+        return {"basin": basin_fp, "pixel": pixel_fp}
 
     paths = find_site_paths(base_dir, site_id)
+
+    if state is None:
+        try:
+            state = paths["zarr_fp"].parts[-4]
+        except Exception:
+            state = "UNKNOWN"
+
+    state = str(state).upper()
+
     events = load_events(paths["events_fp"])
     stage = load_stage(paths["stage_fp"])
     gauge_lat, gauge_lon = load_meta_gauge_latlon(paths["meta_fp"])
-    rain_data = load_rain_zarr(paths["zarr_fp"])
-    matched = build_match(events, rain_data["time"], rain_data["rain"])
 
-    df = compute_event_summary(
+    rain_data = load_rain_zarr(paths["zarr_fp"])
+    matched = build_matched_events(events, stage, rain_data["time"])
+
+    basin_df, pixel_df = compute_site_historical_tables(
+        state=state,
         site_id=site_id,
         matched=matched,
-        stage_df=stage,
         rain_time=rain_data["time"],
-        rain=rain_data["rain"],
+        rain_array=rain_data["rain"],
         pixel_lat=rain_data["lat"],
         pixel_lon=rain_data["lon"],
         gauge_lat=gauge_lat,
         gauge_lon=gauge_lon,
     )
 
-    if df.empty:
+    if basin_df.empty:
         return None
 
-    df.to_parquet(out_fp, index=False)
-    return out_fp
+    basin_df.to_parquet(basin_fp, index=False)
+
+    if not pixel_df.empty:
+        pixel_df.to_parquet(pixel_fp, index=False)
+
+    return {"basin": basin_fp, "pixel": pixel_fp if pixel_fp.exists() else None}
 
 
-def build_many_historical_summaries(*, base_dir: Path, mask_input: Path, out_dir: Path, overwrite: bool = False) -> tuple[int, int]:
+def build_many_historical_summaries(
+    *,
+    base_dir: Path,
+    mask_input: Path,
+    out_dir: Path,
+    overwrite: bool = False,
+    state: str | None = None,
+) -> tuple[int, int]:
     m = pd.read_csv(mask_input, sep="\t", dtype={"site_id": str})
-    sites = m["site_id"].astype(str).tolist()
+
+    if state is not None and "state" in m.columns:
+        m = m[m["state"].astype(str).str.upper() == state.upper()].copy()
 
     ok = 0
     fail = 0
-    for i, site_id in enumerate(sites, start=1):
+
+    for i, row in enumerate(m.itertuples(index=False), start=1):
+        site_id = str(getattr(row, "site_id"))
+        site_state = str(getattr(row, "state", state or "UNKNOWN")).upper()
+
         try:
-            out = build_site_historical_summary(base_dir=base_dir, site_id=site_id, out_dir=out_dir, overwrite=overwrite)
+            out = build_site_historical_summary(
+                base_dir=base_dir,
+                site_id=site_id,
+                state=site_state,
+                out_dir=out_dir,
+                overwrite=overwrite,
+            )
             ok += int(out is not None)
-            print(f"[{i}/{len(sites)}] {site_id} OK")
+            print(f"[{i}/{len(m)}] {site_state} {site_id} OK")
         except Exception as e:
             fail += 1
-            print(f"[{i}/{len(sites)}] {site_id} ERROR {type(e).__name__}: {e}")
+            print(f"[{i}/{len(m)}] {site_state} {site_id} ERROR {type(e).__name__}: {e}")
 
     return ok, fail
