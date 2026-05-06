@@ -132,16 +132,66 @@ def export_basin_alerts_geojson(
     base_dir: Path,
     basin_alerts_parquet: Path,
     out_geojson: Path,
+    relevant_levels: set[str] | None = None,
+    max_features: int | None = 300,
 ) -> Path:
+    """
+    Export operational basin alerts GeoJSON.
+
+    Optimized for web visualization:
+      - exports only relevant alerts
+      - avoids exporting NORMAL basins
+      - optionally limits feature count
+    """
+
     state = state.upper()
     base_dir = Path(base_dir)
     basin_alerts_parquet = Path(basin_alerts_parquet)
     out_geojson = Path(out_geojson)
 
+    if relevant_levels is None:
+        relevant_levels = {"WARNING", "SEVERE"}
+
     df = pd.read_parquet(basin_alerts_parquet)
 
     if "site_id" not in df.columns:
         raise ValueError("basin_alerts parquet must contain site_id")
+
+    # ==========================================================================
+    # FILTER RELEVANT ALERTS
+    # ==========================================================================
+
+    if "alert_level" in df.columns:
+        df = df[df["alert_level"].isin(relevant_levels)].copy()
+
+    # ==========================================================================
+    # SORT MOST IMPORTANT FIRST
+    # ==========================================================================
+
+    sort_cols = [
+        c for c in [
+            "estimated_delta_water_stage",
+            "current_max_pixel_value",
+        ]
+        if c in df.columns
+    ]
+
+    if sort_cols:
+        df = df.sort_values(sort_cols, ascending=False)
+
+    # ==========================================================================
+    # LIMIT FEATURES
+    # ==========================================================================
+
+    if max_features is not None and len(df) > max_features:
+        df = df.head(max_features).copy()
+
+    print("=" * 100)
+    print("EXPORT BASIN ALERTS GEOJSON")
+    print("=" * 100)
+    print(f"relevant_levels : {sorted(relevant_levels)}")
+    print(f"max_features    : {max_features}")
+    print(f"filtered basins : {len(df):,}")
 
     features = []
     missing = []
@@ -171,6 +221,7 @@ def export_basin_alerts_geojson(
 
     for _, row in df.iterrows():
         site_id = str(row["site_id"])
+
         basin_fp = _find_basin_geojson(base_dir, state, site_id)
 
         if basin_fp is None:
@@ -178,12 +229,15 @@ def export_basin_alerts_geojson(
             continue
 
         geom = _extract_geometry_from_basin_json(basin_fp)
+
         if geom is None:
             missing.append(site_id)
             continue
 
         props = _json_safe_properties(row, property_cols)
+
         alert_level = str(props.get("alert_level", "NORMAL"))
+
         props["fill_color"] = ALERT_COLORS.get(alert_level, "#808080")
         props["stroke_color"] = "#222222"
         props["source_basin_json"] = str(basin_fp)
@@ -202,13 +256,15 @@ def export_basin_alerts_geojson(
             "n_features": len(features),
             "n_missing_basins": len(missing),
             "missing_basins_sample": missing[:25],
+            "relevant_levels": sorted(relevant_levels),
+            "max_features": max_features,
         },
     }
 
     _write_geojson(obj, out_geojson)
 
     print("=" * 100)
-    print("BASIN ALERTS GEOJSON")
+    print("BASIN ALERTS GEOJSON DONE")
     print("=" * 100)
     print(f"output          : {out_geojson}")
     print(f"features        : {len(features):,}")
