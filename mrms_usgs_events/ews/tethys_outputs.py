@@ -7,6 +7,7 @@ import shutil
 
 import numpy as np
 import pandas as pd
+import orjson
 
 
 ALERT_COLORS = {
@@ -132,143 +133,161 @@ def export_basin_alerts_geojson(
     base_dir: Path,
     basin_alerts_parquet: Path,
     out_geojson: Path,
-    relevant_levels: set[str] | None = None,
-    max_features: int | None = 300,
+    relevant_levels: list[str] | None = None,
+    max_features: int = 300,
 ) -> Path:
-    """
-    Export operational basin alerts GeoJSON.
+    import json
+    from time import perf_counter
 
-    Optimized for web visualization:
-      - exports only relevant alerts
-      - avoids exporting NORMAL basins
-      - optionally limits feature count
-    """
+    import pandas as pd
+
+    t_total = perf_counter()
 
     state = state.upper()
     base_dir = Path(base_dir)
     basin_alerts_parquet = Path(basin_alerts_parquet)
     out_geojson = Path(out_geojson)
+    out_geojson.parent.mkdir(parents=True, exist_ok=True)
 
     if relevant_levels is None:
-        relevant_levels = {"WARNING", "SEVERE"}
+        relevant_levels = ["SEVERE", "WARNING"]
 
-    df = pd.read_parquet(basin_alerts_parquet)
+    print("=" * 100, flush=True)
+    print("EXPORT BASIN ALERTS GEOJSON", flush=True)
+    print("=" * 100, flush=True)
+    print(f"state            : {state}", flush=True)
+    print(f"base_dir         : {base_dir}", flush=True)
+    print(f"alerts parquet   : {basin_alerts_parquet}", flush=True)
+    print(f"out_geojson      : {out_geojson}", flush=True)
+    print(f"relevant_levels  : {relevant_levels}", flush=True)
+    print(f"max_features     : {max_features}", flush=True)
 
-    if "site_id" not in df.columns:
-        raise ValueError("basin_alerts parquet must contain site_id")
+    t_read_alerts = perf_counter()
+    basin_df = pd.read_parquet(basin_alerts_parquet)
+    print(f"[GEOJSON TIMING] read basin alerts parquet: {perf_counter() - t_read_alerts:.2f} sec", flush=True)
+    print(f"[GEOJSON CHECK] basin alerts rows: {len(basin_df):,}", flush=True)
 
-    # ==========================================================================
-    # FILTER RELEVANT ALERTS
-    # ==========================================================================
+    t_filter = perf_counter()
+    basin_df = basin_df[basin_df["alert_level"].isin(relevant_levels)].copy()
 
-    if "alert_level" in df.columns:
-        df = df[df["alert_level"].isin(relevant_levels)].copy()
+    if "alert_rank" in basin_df.columns:
+        basin_df = basin_df.sort_values(
+            ["alert_rank", "estimated_delta_water_stage", "current_max_pixel_value"],
+            ascending=[False, False, False],
+        )
+    else:
+        basin_order = {"NORMAL": 0, "WATCH": 1, "WARNING": 2, "SEVERE": 3}
+        basin_df["alert_rank"] = basin_df["alert_level"].map(basin_order).fillna(0).astype(int)
+        basin_df = basin_df.sort_values(
+            ["alert_rank", "estimated_delta_water_stage", "current_max_pixel_value"],
+            ascending=[False, False, False],
+        )
 
-    # ==========================================================================
-    # SORT MOST IMPORTANT FIRST
-    # ==========================================================================
+    basin_df = basin_df.head(max_features).reset_index(drop=True)
 
-    sort_cols = [
-        c for c in [
-            "estimated_delta_water_stage",
-            "current_max_pixel_value",
-        ]
-        if c in df.columns
+    print(f"[GEOJSON TIMING] filter/sort alerts: {perf_counter() - t_filter:.2f} sec", flush=True)
+    print(f"[GEOJSON CHECK] filtered basins: {len(basin_df):,}", flush=True)
+
+    t_find_files = perf_counter()
+
+    basins_dir_candidates = [
+        base_dir / "basins_json" / state,
+        base_dir / "basins_json",
+        base_dir / "hydro_history" / "basins_json" / state,
+        base_dir / "hydro_history" / "basins_json",
     ]
 
-    if sort_cols:
-        df = df.sort_values(sort_cols, ascending=False)
+    existing_dirs = [p for p in basins_dir_candidates if p.exists()]
+    print(f"[GEOJSON CHECK] basin json candidate dirs: {[str(p) for p in existing_dirs]}", flush=True)
 
-    # ==========================================================================
-    # LIMIT FEATURES
-    # ==========================================================================
+    basin_json_lookup: dict[str, Path] = {}
 
-    if max_features is not None and len(df) > max_features:
-        df = df.head(max_features).copy()
+    for root_dir in existing_dirs:
+        for fp in root_dir.rglob("*.json"):
+            site_id = fp.stem
+            basin_json_lookup.setdefault(site_id, fp)
 
-    print("=" * 100)
-    print("EXPORT BASIN ALERTS GEOJSON")
-    print("=" * 100)
-    print(f"relevant_levels : {sorted(relevant_levels)}")
-    print(f"max_features    : {max_features}")
-    print(f"filtered basins : {len(df):,}")
+    print(f"[GEOJSON TIMING] build basin json lookup: {perf_counter() - t_find_files:.2f} sec", flush=True)
+    print(f"[GEOJSON CHECK] basin json files indexed: {len(basin_json_lookup):,}", flush=True)
+
+    t_features = perf_counter()
 
     features = []
-    missing = []
+    missing_basins = []
 
-    property_cols = [
-        "state",
-        "site_id",
-        "alert_level",
-        "alert_rank",
-        "current_basin_accumulation",
-        "historical_basin_accumulation_threshold",
-        "basin_accumulation_reaches_history",
-        "current_max_pixel_value",
-        "current_max_pixel_accumulation",
-        "n_basin_pixels",
-        "n_active_pixels",
-        "n_active_pixels_with_history",
-        "n_matched_pixels",
-        "estimated_delta_water_stage",
-        "estimated_time_to_rain_peak_accumulation_hr",
-        "estimated_time_to_stage_peak_hr",
-        "strong_threshold",
-        "accumulation_quantile",
-        "warning_delta_threshold",
-        "severe_delta_threshold",
-    ]
-
-    for _, row in df.iterrows():
-        site_id = str(row["site_id"])
-
-        basin_fp = _find_basin_geojson(base_dir, state, site_id)
+    for row in basin_df.itertuples(index=False):
+        site_id = str(row.site_id)
+        basin_fp = basin_json_lookup.get(site_id)
 
         if basin_fp is None:
-            missing.append(site_id)
+            missing_basins.append(site_id)
             continue
 
-        geom = _extract_geometry_from_basin_json(basin_fp)
+        with open(basin_fp, "r", encoding="utf-8") as f:
+            basin_geojson = json.load(f)
 
-        if geom is None:
-            missing.append(site_id)
+        if basin_geojson.get("type") == "FeatureCollection":
+            if not basin_geojson.get("features"):
+                missing_basins.append(site_id)
+                continue
+            geometry = basin_geojson["features"][0].get("geometry")
+        elif basin_geojson.get("type") == "Feature":
+            geometry = basin_geojson.get("geometry")
+        else:
+            geometry = basin_geojson.get("geometry")
+
+        if geometry is None:
+            missing_basins.append(site_id)
             continue
 
-        props = _json_safe_properties(row, property_cols)
+        properties = {}
 
-        alert_level = str(props.get("alert_level", "NORMAL"))
+        for col in basin_df.columns:
+            value = getattr(row, col)
 
-        props["fill_color"] = ALERT_COLORS.get(alert_level, "#808080")
-        props["stroke_color"] = "#222222"
-        props["source_basin_json"] = str(basin_fp)
+            if pd.isna(value):
+                properties[col] = None
+            elif hasattr(value, "item"):
+                properties[col] = value.item()
+            else:
+                properties[col] = value
 
-        features.append({
-            "type": "Feature",
-            "geometry": geom,
-            "properties": props,
-        })
+        features.append(
+            {
+                "type": "Feature",
+                "geometry": geometry,
+                "properties": properties,
+            }
+        )
 
-    obj = {
+    print(f"[GEOJSON TIMING] build features from basin json: {perf_counter() - t_features:.2f} sec", flush=True)
+    print(f"[GEOJSON CHECK] features: {len(features):,}", flush=True)
+    print(f"[GEOJSON CHECK] missing basins: {len(missing_basins):,}", flush=True)
+
+    t_write = perf_counter()
+
+    out = {
         "type": "FeatureCollection",
         "features": features,
-        "metadata": {
-            "state": state,
-            "n_features": len(features),
-            "n_missing_basins": len(missing),
-            "missing_basins_sample": missing[:25],
-            "relevant_levels": sorted(relevant_levels),
-            "max_features": max_features,
-        },
     }
 
-    _write_geojson(obj, out_geojson)
+    with open(out_geojson, "wb") as f:
+        f.write(
+            orjson.dumps(
+                out,
+                option=orjson.OPT_NON_STR_KEYS,
+            )
+        )
 
-    print("=" * 100)
-    print("BASIN ALERTS GEOJSON DONE")
-    print("=" * 100)
-    print(f"output          : {out_geojson}")
-    print(f"features        : {len(features):,}")
-    print(f"missing basins  : {len(missing):,}")
+    print(f"[GEOJSON TIMING] write geojson: {perf_counter() - t_write:.2f} sec", flush=True)
+
+    print("=" * 100, flush=True)
+    print("BASIN ALERTS GEOJSON DONE", flush=True)
+    print("=" * 100, flush=True)
+    print(f"output          : {out_geojson}", flush=True)
+    print(f"features        : {len(features)}", flush=True)
+    print(f"missing basins  : {len(missing_basins)}", flush=True)
+    print(f"[GEOJSON TIMING] total export: {perf_counter() - t_total:.2f} sec", flush=True)
 
     return out_geojson
 
