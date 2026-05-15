@@ -45,6 +45,7 @@ dependencies = [
   "pyarrow",
   "Hydro-Event-Detector",
   "geopandas",
+  "orjson",
 ]
 
 
