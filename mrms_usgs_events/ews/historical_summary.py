@@ -80,10 +80,14 @@ def build_matched_events(
     matched["effective_start_rain"] = matched["effective_start_rain"].fillna(matched["start_rain"])
     matched["overlap_trimmed"] = matched["effective_start_rain"] > matched["start_rain"]
 
+    rain_start = pd.to_datetime(matched["effective_start_rain"]).dt.floor("h")
+    rain_end = pd.to_datetime(matched["date_peak"]).dt.ceil("h")
+
+
     r0, r1 = build_window_indices(
         rain_time,
-        matched["effective_start_rain"],
-        matched["date_peak"],
+        rain_start,
+        rain_end,
     )
 
     matched["rain_window_start_idx"] = r0.astype(np.int64)
@@ -211,7 +215,7 @@ def compute_site_historical_tables(
             }
         )
 
-        keep = positive | strong
+        keep = strong # to keep > 0 change for positive
 
         if not np.any(keep):
             continue
