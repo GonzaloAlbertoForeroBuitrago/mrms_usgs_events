@@ -259,17 +259,69 @@ def _process_one_basin(
         historical_basin_acc_values.append(hist["basin_accumulation"][idx0])
         active_pixels_with_history.append((local_j, idx0))
 
+
     if historical_basin_acc_values:
         historical_basin_acc_all = np.concatenate(historical_basin_acc_values).astype(np.float32)
+
         historical_basin_acc_threshold = float(
             np.nanquantile(historical_basin_acc_all, accumulation_quantile)
         )
+
+
+        historical_event_id_all = np.concatenate(
+            [
+                hist["event_id"][idx0]
+                for _, idx0 in active_pixels_with_history
+            ]
+        ).astype(np.int32)
+
+        historical_delta_all = np.concatenate(
+            [
+                hist["delta_water_stage"][idx0]
+                for _, idx0 in active_pixels_with_history
+            ]
+        ).astype(np.float32)
+
+        valid = np.isfinite(historical_delta_all)
+
+        historical_event_id_all = historical_event_id_all[valid]
+        historical_delta_all = historical_delta_all[valid]
+
+        if historical_delta_all.size > 0:
+            _, unique_pos = np.unique(historical_event_id_all, return_index=True)
+            historical_delta_unique = historical_delta_all[unique_pos]
+        else:
+            historical_delta_unique = historical_delta_all
+
+
+        if historical_delta_unique.size > 0:
+            warning_delta_threshold = float(np.nanquantile(historical_delta_unique, 0.25))
+            severe_delta_threshold = float(np.nanquantile(historical_delta_unique, 0.50))
+
+
+            print(
+                f"[THRESHOLDS] "
+                f"site={site_id} "
+                f"n_pixel_values={historical_delta_all.size} "
+                f"n_unique_events={historical_delta_unique.size} "
+                f"warning={warning_delta_threshold:.2f} "
+                f"severe={severe_delta_threshold:.2f}"
+            )
+
+
+        else:
+            warning_delta_threshold = np.nan
+            severe_delta_threshold = np.nan
+        
         basin_accumulation_reaches_history = (
             current_basin_accumulation >= historical_basin_acc_threshold
         )
     else:
         historical_basin_acc_threshold = np.nan
+        warning_delta_threshold = np.nan
+        severe_delta_threshold = np.nan
         basin_accumulation_reaches_history = False
+
 
     matched_delta_values = []
     matched_time_stage_values = []
@@ -352,6 +404,15 @@ def _process_one_basin(
         estimated_delta_water_stage=estimated_delta,
         severe_delta_threshold=severe_delta_threshold,
         warning_delta_threshold=warning_delta_threshold,
+    )
+
+    print(
+        f"[ALERT] "
+        f"site={site_id} "
+        f"level={alert_level} "
+        f"estimated_delta={estimated_delta:.2f} "
+        f"warning={warning_delta_threshold:.2f} "
+        f"severe={severe_delta_threshold:.2f}"
     )
 
     basin_row = {
