@@ -15,7 +15,7 @@ from .common import (
     to_naive_timestamp,
 )
 
-STRONG_RAIN_MM_H = 7.5
+STRONG_RAIN_MM_H = 3.0
 
 
 def load_events(events_fp: Path) -> pd.DataFrame:

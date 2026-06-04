@@ -150,7 +150,7 @@ def build_state_pixel_event_index_npz(
     idx: dict,
     pixel_files: list[Path],
     out_fp: Path,
-    min_pixel_value: float = 7.5,
+    min_pixel_value: float = 3.0,
     only_stage_response_p50: bool = True,
     batch_size: int = 10,
 ) -> Path:
@@ -370,8 +370,8 @@ def build_state_historical_summary_parallel(
     workers: int = 4,
     overwrite_sites: bool = False,
     overwrite_index: bool = True,
-    min_pixel_value: float = 7.5,
-    only_stage_response_p50: bool = True,
+    min_pixel_value: float = 3.0,
+    only_stage_response_p50: bool = False,
     index_batch_size: int = 10,
 ) -> dict[str, Path | None]:
     state = state.upper()
@@ -488,7 +488,7 @@ def build_state_historical_summary(
         workers=1,
         overwrite_sites=overwrite_sites,
         overwrite_index=overwrite_index,
-        min_pixel_value=7.5,
-        only_stage_response_p50=True,
+        min_pixel_value=3.0,
+        only_stage_response_p50=False,
         index_batch_size=10,
     )
