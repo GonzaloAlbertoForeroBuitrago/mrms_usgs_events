@@ -177,6 +177,9 @@ def _normal_basin_row(
         "accumulation_quantile": accumulation_quantile,
         "warning_delta_threshold": warning_delta_threshold,
         "severe_delta_threshold": severe_delta_threshold,
+        "fastest_historical_severe_response_hr": np.nan,
+        "fastest_historical_severe_delta_water_stage": np.nan,
+        "fastest_historical_severe_basin_accumulation": np.nan,
     }
 
 
@@ -234,6 +237,10 @@ def _process_one_basin(
 
     historical_basin_acc_values = []
     active_pixels_with_history = []
+
+    fastest_historical_severe_response_hr = np.nan
+    fastest_historical_severe_delta_water_stage = np.nan
+    fastest_historical_severe_basin_accumulation = np.nan
 
     for local_j in active_local:
         pixel_id_state = int(basin_pixels[local_j])
@@ -298,6 +305,47 @@ def _process_one_basin(
             warning_delta_threshold = float(np.nanquantile(historical_delta_unique, 0.25))
             severe_delta_threshold = float(np.nanquantile(historical_delta_unique, 0.50))
 
+            all_hist_idx = np.concatenate(
+                [idx0 for _, idx0 in active_pixels_with_history]
+            )
+
+            hist_time_stage_all = hist["time_to_stage_peak_hr"][all_hist_idx].astype(np.float32)
+            hist_delta_all_for_fastest = hist["delta_water_stage"][all_hist_idx].astype(np.float32)
+            hist_basin_acc_all_for_fastest = hist["basin_accumulation"][all_hist_idx].astype(np.float32)
+
+            severe_fast_mask = (
+                np.isfinite(hist_time_stage_all)
+                & np.isfinite(hist_delta_all_for_fastest)
+                & np.isfinite(hist_basin_acc_all_for_fastest)
+                & (hist_time_stage_all >= 0)
+                & (hist_delta_all_for_fastest >= severe_delta_threshold)
+            )
+
+            if np.any(severe_fast_mask):
+                severe_positions = np.flatnonzero(severe_fast_mask)
+                fastest_pos = severe_positions[
+                    int(np.nanargmin(hist_time_stage_all[severe_fast_mask]))
+                ]
+
+                fastest_historical_severe_response_hr = float(
+                    hist_time_stage_all[fastest_pos]
+                )
+                fastest_historical_severe_delta_water_stage = float(
+                    hist_delta_all_for_fastest[fastest_pos]
+                )
+                fastest_historical_severe_basin_accumulation = float(
+                    hist_basin_acc_all_for_fastest[fastest_pos]
+                )
+            if site_id == "08165500":
+                print(
+                    f"[FASTEST SEVERE DEBUG] "
+                    f"site={site_id} "
+                    f"fastest_pos={fastest_pos} "
+                    f"response_hr={fastest_historical_severe_response_hr:.6f} "
+                    f"delta={fastest_historical_severe_delta_water_stage:.6f} "
+                    f"basin_acc={fastest_historical_severe_basin_accumulation:.6f}",
+                    flush=True,
+                )
 
             print(
                 f"[THRESHOLDS] "
@@ -431,6 +479,9 @@ def _process_one_basin(
         "estimated_delta_water_stage": estimated_delta,
         "estimated_time_to_rain_peak_accumulation_hr": estimated_time_rain,
         "estimated_time_to_stage_peak_hr": estimated_time_stage,
+        "fastest_historical_severe_response_hr": fastest_historical_severe_response_hr,
+        "fastest_historical_severe_delta_water_stage": fastest_historical_severe_delta_water_stage,
+        "fastest_historical_severe_basin_accumulation": fastest_historical_severe_basin_accumulation,
         "strong_threshold": strong_threshold,
         "accumulation_quantile": accumulation_quantile,
         "warning_delta_threshold": warning_delta_threshold,
