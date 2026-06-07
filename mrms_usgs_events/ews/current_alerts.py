@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 
 
-STRONG_RAIN_MM_H = 7.5
+STRONG_RAIN_MM_H = 3.0
 
 _WORKER_STATE: dict = {}
 
@@ -124,7 +124,7 @@ def classify_alert(
     matched_pixels: int,
     estimated_delta_water_stage: float,
     severe_delta_threshold: float = 10.0,
-    warning_delta_threshold: float = 2.0,
+    warning_delta_threshold: float = 5.0,
 ) -> str:
     if current_max_pixel_value < STRONG_RAIN_MM_H or n_active_pixels == 0:
         return "NORMAL"
@@ -302,8 +302,8 @@ def _process_one_basin(
 
 
         if historical_delta_unique.size > 0:
-            warning_delta_threshold = float(np.nanquantile(historical_delta_unique, 0.25))
-            severe_delta_threshold = float(np.nanquantile(historical_delta_unique, 0.50))
+            warning_delta_threshold = float(np.nanquantile(historical_delta_unique, 0.50))
+            severe_delta_threshold = float(np.nanquantile(historical_delta_unique, 0.75))
 
             all_hist_idx = np.concatenate(
                 [idx0 for _, idx0 in active_pixels_with_history]
