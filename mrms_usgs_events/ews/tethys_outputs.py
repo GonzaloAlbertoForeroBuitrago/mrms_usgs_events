@@ -172,7 +172,7 @@ def export_basin_alerts_geojson(
 
     if "alert_rank" in basin_df.columns:
         basin_df = basin_df.sort_values(
-            ["alert_rank", "estimated_delta_water_stage", "current_max_pixel_value"],
+            ["alert_rank", "efficient_weighted_percentile", "current_max_pixel_value"],
             ascending=[False, False, False],
         )
     else:
