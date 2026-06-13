@@ -471,10 +471,11 @@ def build_site_efficient_event_summary_from_basin_file(
         return out
 
     required = [
-        "event_id",
-        "delta_water_stage",
-        "basin_accumulation",
-        "max_pixel_accumulation",
+    "event_id",
+    "delta_water_stage",
+    "basin_accumulation",
+    "max_pixel_accumulation",
+    "time_to_rain_peak_accumulation_hr",
     ]
 
     optional = []
@@ -569,6 +570,13 @@ def build_site_efficient_event_summary_from_basin_file(
 
     if "pixel_peak_time" not in df.columns:
         df["pixel_peak_time"] = np.nan
+    
+    df["basin_rain_peak_lead_time_hr"] = np.where(
+        np.isfinite(df["time_to_rain_peak_accumulation_hr"])
+        & (df["time_to_rain_peak_accumulation_hr"] <= 0),
+        -df["time_to_rain_peak_accumulation_hr"],
+        np.nan,
+    )
 
     df = df[
         np.isfinite(df["event_id"])
@@ -584,16 +592,16 @@ def build_site_efficient_event_summary_from_basin_file(
 
     # Keep only strictly positive timing values for both diagnostics.
     df["basin_peak_time_valid"] = df["basin_peak_time"].where(
-        np.isfinite(df["basin_peak_time"])
-        & (df["basin_peak_time"] > 0),
-        np.nan,
-    )
+            np.isfinite(df["basin_peak_time"])
+            & (df["basin_peak_time"] > 0),
+            df["basin_rain_peak_lead_time_hr"],
+        )
 
     df["pixel_peak_time_valid"] = df["pixel_peak_time"].where(
-        np.isfinite(df["pixel_peak_time"])
-        & (df["pixel_peak_time"] > 0),
-        np.nan,
-    )
+            np.isfinite(df["pixel_peak_time"])
+            & (df["pixel_peak_time"] > 0),
+            df["basin_rain_peak_lead_time_hr"],
+        )
 
     # Robust aggregation in case a basin file ever contains repeated event IDs.
     ev = (
