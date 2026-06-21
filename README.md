@@ -4,6 +4,8 @@ If you use this package in your research, please cite:
 
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.19378061.svg)](https://doi.org/10.5281/zenodo.19378061)
 
+## USGS Time-series peak extraction, NLDI USGS basin delineation, state-level Multi Radar Multi Sensor MRMS fast data download and Zarr conversion.
+
 ## Environment Setup & package Installation 
 
 (WSL required for Windows users due to GDAL/GRIB dependencies) 

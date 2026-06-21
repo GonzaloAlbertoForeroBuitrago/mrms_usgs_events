@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "mrms-usgs-events"
 version = "0.1.2"
-description = "Pipeline for downloading USGS site data, extracting events, and generating MRMS RadarOnly Zarr datasets."
+description = "Time-series peak extraction, basin delineation, state-level MRMS data download, and Zarr conversion."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
