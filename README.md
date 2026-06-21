@@ -20,9 +20,9 @@ micromamba info
 
 2. Create and activate environment
 
-micromamba create -n mrms_usgs_events -c conda-forge python=3.11 gdal geopandas libgdal-grib -y
+micromamba create -n tethys_flood -c conda-forge python=3.11 gdal geopandas libgdal-grib -y
 
-micromamba activate mrms_usgs_events
+micromamba activate tethys_flood
 
 3. Install the package
 
