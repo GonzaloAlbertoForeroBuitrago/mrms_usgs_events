@@ -506,7 +506,8 @@ def build_site_efficient_event_summary_from_basin_file(
     #
     # pixel_peak_time:
     #   time_to_stage_peak_hr for the strongest historical pixel in the event,
-    #   where strongest means highest pixel_accumulation, then highest pixel_value.
+    #   where strongest means highest pixel_accumulation, then highest pixel_value.    
+    
     if pixel_fp is not None and Path(pixel_fp).exists():
         try:
             pix = pd.read_parquet(
@@ -514,43 +515,86 @@ def build_site_efficient_event_summary_from_basin_file(
                 columns=[
                     "event_id",
                     "time_to_stage_peak_hr",
+                    "time_to_rain_peak_accumulation_hr",
                     "pixel_accumulation",
+                    "basin_accumulation",
+                    "delta_water_stage",
                     "pixel_value",
                 ],
             )
 
             pix = pix[
                 np.isfinite(pix["event_id"])
-                & np.isfinite(pix["time_to_stage_peak_hr"])
                 & np.isfinite(pix["pixel_accumulation"])
-                & np.isfinite(pix["pixel_value"])
-                & (pix["time_to_stage_peak_hr"] > 0)
+                & np.isfinite(pix["basin_accumulation"])
+                & np.isfinite(pix["delta_water_stage"])
+                & (pix["pixel_accumulation"] > 0)
+                & (pix["basin_accumulation"] > 0)
             ].copy()
 
             if not pix.empty:
-                basin_time = (
+                # Critical: keep only events that have valid pixel history.
+                valid_event_ids = set(pix["event_id"].astype(int).unique())
+                df = df[df["event_id"].astype(int).isin(valid_event_ids)].copy()
+
+                # Rebuild event-level rainfall/delta values from pixel history.
+                event_from_pixels = (
                     pix.groupby("event_id", as_index=False)
-                    .agg(basin_peak_time=("time_to_stage_peak_hr", "min"))
-                )
-
-                strongest_pixel_time = (
-                    pix.sort_values(
-                        ["event_id", "pixel_accumulation", "pixel_value"],
-                        ascending=[True, False, False],
+                    .agg(
+                        max_pixel_accumulation=("pixel_accumulation", "max"),
+                        basin_accumulation=("basin_accumulation", "max"),
+                        delta_water_stage=("delta_water_stage", "max"),
                     )
-                    .groupby("event_id", as_index=False)
-                    .first()[["event_id", "time_to_stage_peak_hr"]]
-                    .rename(columns={"time_to_stage_peak_hr": "pixel_peak_time"})
                 )
 
-                timing = basin_time.merge(
-                    strongest_pixel_time,
+                df = df.drop(
+                    columns=[
+                        "max_pixel_accumulation",
+                        "basin_accumulation",
+                        "delta_water_stage",
+                    ],
+                    errors="ignore",
+                ).merge(
+                    event_from_pixels,
                     on="event_id",
-                    how="left",
+                    how="inner",
                 )
 
-                df = df.merge(timing, on="event_id", how="left")
+                # Positive-time diagnostics only.
+                pix_time = pix[
+                    np.isfinite(pix["time_to_stage_peak_hr"])
+                    & (pix["time_to_stage_peak_hr"] > 0)
+                ].copy()
+
+                if not pix_time.empty:
+                    basin_time = (
+                        pix_time.groupby("event_id", as_index=False)
+                        .agg(basin_peak_time=("time_to_stage_peak_hr", "min"))
+                    )
+
+                    strongest_pixel_time = (
+                        pix_time.sort_values(
+                            ["event_id", "pixel_accumulation", "pixel_value"],
+                            ascending=[True, False, False],
+                        )
+                        .groupby("event_id", as_index=False)
+                        .first()[["event_id", "time_to_stage_peak_hr"]]
+                        .rename(columns={"time_to_stage_peak_hr": "pixel_peak_time"})
+                    )
+
+                    timing = basin_time.merge(
+                        strongest_pixel_time,
+                        on="event_id",
+                        how="left",
+                    )
+
+                    df = df.merge(timing, on="event_id", how="left")
+                else:
+                    df["basin_peak_time"] = np.nan
+                    df["pixel_peak_time"] = np.nan
+
             else:
+                df = df.iloc[0:0].copy()
                 df["basin_peak_time"] = np.nan
                 df["pixel_peak_time"] = np.nan
 
@@ -561,9 +605,8 @@ def build_site_efficient_event_summary_from_basin_file(
             )
             df["basin_peak_time"] = np.nan
             df["pixel_peak_time"] = np.nan
-    else:
-        df["basin_peak_time"] = np.nan
-        df["pixel_peak_time"] = np.nan
+
+
 
     if "basin_peak_time" not in df.columns:
         df["basin_peak_time"] = np.nan
