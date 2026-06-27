@@ -196,32 +196,41 @@ def classify_percentile_alert(percentile_value: float) -> str:
     return "NORMAL"
 
 
-def classify_efficient_event_alert(*, pixel_pct: float, basin_pct: float, weighted_pct: float) -> tuple[str, str]:
-    """
-    Basin scientific alert level.
+def classify_efficient_event_alert(
+    *,
+    current_pixel: float,
+    current_basin: float,
+    pixel_p50: float,
+    pixel_p75: float,
+    pixel_p90: float,
+    basin_p50: float,
+    basin_p75: float,
+    basin_p90: float,
+    pixel_pct: float,
+    basin_pct: float,
+    weighted_pct: float,
+) -> tuple[str, str]:
+    pixel_ge_p90 = np.isfinite(current_pixel) and np.isfinite(pixel_p90) and current_pixel >= pixel_p90
+    pixel_ge_p75 = np.isfinite(current_pixel) and np.isfinite(pixel_p75) and current_pixel >= pixel_p75
+    pixel_ge_p50 = np.isfinite(current_pixel) and np.isfinite(pixel_p50) and current_pixel >= pixel_p50
 
-    SEVERE requires a strong combination of local pixel extremeness and basin accumulation:
-      - pixel >= P90 AND basin >= P75
+    basin_ge_p90 = np.isfinite(current_basin) and np.isfinite(basin_p90) and current_basin >= basin_p90
+    basin_ge_p75 = np.isfinite(current_basin) and np.isfinite(basin_p75) and current_basin >= basin_p75
+    basin_ge_p50 = np.isfinite(current_basin) and np.isfinite(basin_p50) and current_basin >= basin_p50
 
-    WARNING is used when only one extreme signal is present, or weighted percentile is high.
-    WATCH is used when weighted percentile is >= P50.
-    """
-    pixel_extreme = np.isfinite(pixel_pct) and pixel_pct >= 90.0
-    basin_high = np.isfinite(basin_pct) and basin_pct >= 75.0
-    basin_extreme = np.isfinite(basin_pct) and basin_pct >= 90.0
     weighted_warning = np.isfinite(weighted_pct) and weighted_pct >= 75.0
     weighted_watch = np.isfinite(weighted_pct) and weighted_pct >= 50.0
 
-    if pixel_extreme and basin_high:
-        return "SEVERE", "PIXEL_P90_AND_BASIN_P75"
-    if pixel_extreme:
-        return "WARNING", "PIXEL_P90_ONLY"
-    if basin_extreme:
-        return "WARNING", "BASIN_P90_ONLY"
-    if weighted_warning:
-        return "WARNING", "WEIGHTED_P75"
-    if weighted_watch:
-        return "WATCH", "WEIGHTED_P50"
+    if pixel_ge_p90 and basin_ge_p75:
+        return "SEVERE", "PIXEL_GE_P90_AND_BASIN_GE_P75"
+    if pixel_ge_p90:
+        return "WARNING", "PIXEL_GE_P90_ONLY"
+    if basin_ge_p90:
+        return "WARNING", "BASIN_GE_P90_ONLY"
+    if pixel_ge_p75 or basin_ge_p75 or weighted_warning:
+        return "WARNING", "PIXEL_OR_BASIN_GE_P75_OR_WEIGHTED_P75"
+    if pixel_ge_p50 or basin_ge_p50 or weighted_watch:
+        return "WATCH", "PIXEL_OR_BASIN_GE_P50_OR_WEIGHTED_P50"
     return "NORMAL", "BELOW_P50"
 
 
@@ -664,6 +673,14 @@ def _process_one_basin(
         efficient_decision_reason = "NO_STRONG_CURRENT_PIXEL"
     elif efficient_alerts["efficient_history_ok"]:
         alert_level, efficient_decision_reason = classify_efficient_event_alert(
+            current_pixel=current_max_pixel_accumulation,
+            current_basin=current_basin_accumulation,
+            pixel_p50=efficient_ref["pixel_p50"][basin_i],
+            pixel_p75=efficient_ref["pixel_p75"][basin_i],
+            pixel_p90=efficient_ref["pixel_p90"][basin_i],
+            basin_p50=efficient_ref["basin_p50"][basin_i],
+            basin_p75=efficient_ref["basin_p75"][basin_i],
+            basin_p90=efficient_ref["basin_p90"][basin_i],
             pixel_pct=pixel_pct,
             basin_pct=basin_pct,
             weighted_pct=weighted_pct,
