@@ -4,7 +4,11 @@ If you use this package in your research, please cite:
 
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.19378061.svg)](https://doi.org/10.5281/zenodo.19378061)
 
-## USGS Time-series peak extraction, NLDI USGS basin delineation, state-level Multi Radar Multi Sensor MRMS fast data download and Zarr conversion.
+## The package performs
+
+Peak extraction, basin delineation, mask generation, state-scale MRMS downloads in less than one minute, and Zarr conversion. This fast processing enables state-based operational analyses across the entire United States using real observations.
+
+Although the methodology can continue to be improved, it provides a flexible foundation for future research and collaborations are welcome to expand and refine its capabilities.
 
 ## Environment Setup & package Installation 
 
