@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from multiprocessing import get_context
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import pandas as pd
@@ -91,10 +91,8 @@ def build_current_state_rain_npz(
     ok_count = 0
     missing = []
 
-    ctx = get_context("fork")
-
-    with ctx.Pool(processes=workers) as pool:
-        for result in pool.imap_unordered(_worker_process_hour, tasks):
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for result in pool.map(_worker_process_hour, tasks):
             i = int(result["i"])
             status = result["status"]
             arr = result["rain"]
