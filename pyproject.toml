@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mrms-usgs-events"
-version = "0.1.2"
+version = "0.1.3"
 description = "Time-series peak extraction, basin delineation, state-level MRMS data download, and Zarr conversion."
 readme = "README.md"
 requires-python = ">=3.10"
